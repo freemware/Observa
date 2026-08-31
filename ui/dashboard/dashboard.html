@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>WebLens</title>
+  <link rel="stylesheet" href="../theme.css"/>
+  <style>
+    /* s1/s2/s3 aliases kept so the rest of this stylesheet (written before
+       the shared token pass) doesn't need a full find/replace — they just
+       forward to the shared surface tokens in theme.css. */
+    :root {
+      --s1: var(--surface1);
+      --s2: var(--surface2);
+      --s3: var(--surface3);
+      --green:  rgb(var(--success-rgb));
+      --orange: rgb(var(--warning-rgb));
+      --red:    rgb(var(--danger-rgb));
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%;overflow:hidden}
+    body{
+      background:var(--bg);color:var(--text);
+      font:13px/1.5 system-ui,-apple-system,sans-serif;
+      display:flex;flex-direction:column;
+    }
+
+    /* ── Topbar ─────────────────────────────────────────────────────────── */
+    .topbar{
+      display:flex;align-items:center;gap:8px;padding:0 16px;
+      height:52px;flex-shrink:0;
+      background:var(--s1);
+      border-bottom:1px solid var(--border2);
+      box-shadow:0 1px 0 rgba(var(--accent-rgb),.06), 0 2px 8px rgba(var(--accent-rgb),.05);
+    }
+    .logo{
+      font-size:16px;font-weight:900;letter-spacing:-.04em;flex-shrink:0;
+      background:linear-gradient(135deg,rgb(var(--accent-rgb)) 0%,rgb(var(--social-rgb)) 55%,rgb(var(--fingerprint-rgb)) 100%);
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+    }
+    /* ── Logo mark ── a lens with a small tracker-graph inside it: what the
+       product does (reveal the hidden network of trackers) drawn literally,
+       same 3-stop gradient as the wordmark so icon and text read as one
+       unit rather than two competing brand elements. */
+    .logo-mark{display:flex;align-items:center;gap:6px;flex-shrink:0}
+    .logo-icon{flex-shrink:0}
+    .divider{width:1px;height:20px;background:var(--border2);flex-shrink:0;margin:0 2px}
+
+    /* Session selector */
+    .session-wrap{position:relative;flex-shrink:0}
+    #sessionSelect{
+      appearance:none;background:var(--s2);border:1px solid var(--border2);
+      border-radius:8px;color:var(--text);font:12px system-ui;
+      padding:5px 26px 5px 10px;cursor:pointer;max-width:210px;
+      transition:border-color .15s,box-shadow .15s;
+    }
+    #sessionSelect:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.12)}
+    .sarrow{position:absolute;right:8px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--muted);font-size:9px}
+
+    /* Search */
+    .search-wrap{position:relative;flex-shrink:0}
+    #searchInput{
+      background:var(--s2);border:1px solid var(--border2);border-radius:8px;
+      color:var(--text);font:12px system-ui;
+      padding:5px 10px 5px 28px;width:150px;
+      transition:border-color .15s,width .2s,box-shadow .15s;
+    }
+    #searchInput:focus{outline:none;border-color:var(--accent);width:195px;box-shadow:0 0 0 3px rgba(var(--accent-rgb),.12)}
+    #searchInput::placeholder{color:var(--muted)}
+    .sicon{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none;font-size:12px}
+
+    /* Stats — secondary reference now that the hero line (in graph-view)
+       carries the same numbers as a readable sentence. Kept in the topbar
+       (rather than dropped) because it's the only totals readout visible
+       from the Organizations tab too, but de-emphasized so it no longer
+       visually competes with the hero line for "read this first". */
+    .stats{display:flex;align-items:baseline;gap:7px;margin-left:auto;flex-shrink:0;padding:0 6px;cursor:default}
+    .stat{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
+    .stat .n{font-size:12px;font-weight:700;letter-spacing:-.01em;color:var(--text2);display:inline-block}
+    .stat .l{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+    .stat.s-warn .n{color:rgb(var(--warning-rgb))}
+    .stat.s-danger .n{color:rgb(var(--danger-rgb))}
+    .stat-sep{color:var(--border2);font-size:10px}
+
+    /* View tabs */
+    .vtabs{display:flex;gap:2px;flex-shrink:0;background:var(--s3);border-radius:9px;padding:3px}
+    .vtab{
+      padding:4px 11px;font-size:11px;font-weight:600;border-radius:7px;
+      border:none;background:none;color:var(--muted);
+      cursor:pointer;transition:all .15s;
+    }
+    .vtab.active{background:var(--s1);color:var(--accent2);box-shadow:var(--shadow)}
+    .vtab:hover:not(.active){background:rgba(var(--accent-rgb),.07);color:var(--text2)}
+
+    /* Action buttons */
+    .topbar-btn{
+      padding:5px 11px;font-size:11px;font-weight:600;border-radius:8px;
+      border:1px solid var(--border2);background:var(--s1);color:var(--muted2);
+      cursor:pointer;transition:all .15s;flex-shrink:0;white-space:nowrap;
+      box-shadow:0 1px 3px rgba(var(--accent-rgb),.06);
+    }
+    .topbar-btn:hover{background:var(--s2);color:var(--text);border-color:var(--border3)}
+    .topbar-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);box-shadow:0 2px 8px rgba(var(--accent-rgb),.35)}
+    .topbar-btn.btn-warn{border-color:rgba(var(--danger-rgb),.35);color:rgb(var(--danger-rgb));background:rgba(var(--danger-rgb),.08)}
+    .topbar-btn.btn-warn:hover{background:rgba(var(--danger-rgb),.16)}
+    .topbar-btn.btn-warn.active{background:rgb(var(--danger-strong-rgb));color:#fff;border-color:rgb(var(--danger-strong-rgb))}
+    .kbd-hint{font-size:8px;opacity:.5;margin-left:3px;font-family:monospace;background:var(--s3);padding:1px 3px;border-radius:3px;border:1px solid var(--border2)}
+
+    /* ── Layout ─────────────────────────────────────────────────────────── */
+    .main{display:flex;flex:1;overflow:hidden;min-height:0}
+
+    /* ── Footer credit — deliberately minimal: one small low-contrast line,
+       out of the flow of everything above it, never overlapping content. ── */
+    .app-footer{
+      flex-shrink:0;padding:3px 16px;font-size:9.5px;color:var(--muted);
+      opacity:.55;text-align:right;background:var(--s1);border-top:1px solid var(--border);
+      user-select:none;
+    }
+
+    /* ── Hero line — the one-sentence summary, shown before anyone has to
+       click anything ──────────────────────────────────────────────────── */
+    .hero-line{
+      padding:12px 20px 10px;font-size:13px;color:var(--text2);line-height:1.55;
+      border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface1);
+      display:flex;align-items:center;justify-content:space-between;gap:14px;
+    }
+    .hero-line strong{color:var(--text)}
+    .hero-line-text{flex:1;min-width:0}
+    #btnReplay{
+      flex-shrink:0;display:inline-flex;align-items:center;gap:6px;
+      padding:5px 12px;border-radius:var(--radius-md);border:1px solid var(--border2);
+      background:var(--surface2);color:var(--text2);font-size:11px;font-weight:600;
+      cursor:pointer;transition:all .15s;white-space:nowrap;
+    }
+    #btnReplay:hover{background:var(--surface3);color:var(--text)}
+    #btnReplay:disabled{opacity:.5;cursor:default}
+
+    /* ── Data Journey replay overlay ─────────────────────────────────────── */
+    .journey-timeline{display:flex;flex-direction:column;padding:4px 0}
+    .journey-step{
+      display:flex;align-items:flex-start;gap:12px;opacity:0;
+      transform:translateY(4px);transition:opacity .3s ease,transform .3s ease;
+    }
+    .journey-step.shown{opacity:1;transform:translateY(0)}
+    .journey-step-rail{display:flex;flex-direction:column;align-items:center;flex-shrink:0;width:16px}
+    .journey-step-dot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex-shrink:0;margin-top:4px}
+    .journey-step-dot.origin{background:rgb(var(--success-rgb))}
+    .journey-step-line{width:2px;flex:1;background:var(--border2);min-height:22px}
+    .journey-step-body{flex:1;padding-bottom:18px;min-width:0}
+    .journey-step-delta{font-size:10px;color:var(--muted);font-weight:600;margin-bottom:2px}
+    .journey-step-name{font-size:13px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px}
+    .journey-step-meta{font-size:11px;color:var(--muted2);margin-top:2px}
+    .journey-summary{
+      margin-top:6px;padding:12px 14px;border-radius:var(--radius-md);
+      background:rgba(var(--accent-rgb),.08);border:1px solid rgba(var(--accent-rgb),.25);
+      font-size:13px;color:var(--text2);line-height:1.55;opacity:0;transition:opacity .4s ease;
+    }
+    .journey-summary.shown{opacity:1}
+    .journey-summary strong{color:var(--text)}
+
+    /* ── Map/Table mode toggle — replaces the old separate Table vtab ──── */
+    .mode-toggle{
+      position:absolute;top:10px;right:14px;z-index:15;
+      display:flex;gap:2px;background:var(--surface1);border:1px solid var(--border2);
+      border-radius:9px;padding:3px;box-shadow:var(--shadow);
+    }
+    .mode-btn{
+      width:28px;height:24px;display:flex;align-items:center;justify-content:center;
+      border:none;background:none;border-radius:6px;color:var(--muted);cursor:pointer;
+      transition:all .15s;
+    }
+    .mode-btn.active{background:var(--accent);color:#fff}
+    .mode-btn:hover:not(.active){background:var(--surface2);color:var(--text2)}
+
+    /* ── Graph ──────────────────────────────────────────────────────────── */
+    #graph-view{display:flex;flex-direction:column;flex:1;overflow:hidden;min-width:0}
+    /* Positioned ancestor for .mode-toggle, so it anchors to the graph/table
+       area itself (works in both map and table mode) instead of escaping to
+       whatever positioned ancestor happens to sit further up the tree. */
+    #graph-area{position:relative;flex:1;display:flex;flex-direction:column;min-height:0}
+    #cy-wrap{flex:1;position:relative;overflow:hidden}
+    #cy-wrap.wl-hidden, #table-view.wl-hidden{display:none}
+    #cy{
+      width:100%;height:100%;
+      background:radial-gradient(ellipse at 50% 40%, var(--surface2) 0%, var(--bg) 65%, var(--surface1) 100%);
+    }
+
+    /* Tooltip */
+    #tooltip{
+      position:absolute;pointer-events:none;
+      background:var(--surface1);border:1px solid var(--border2);
+      border-radius:12px;padding:11px 14px;font-size:11px;color:var(--text);
+      box-shadow:var(--shadow2);opacity:0;transition:opacity .12s;
+      z-index:20;max-width:230px;
+    }
+    #tooltip.show{opacity:1}
+    .tt-domain{font-family:monospace;font-weight:700;margin-bottom:2px;font-size:12px;color:var(--accent2)}
+    .tt-org{color:var(--muted2);font-size:10px;margin-bottom:5px}
+    .tt-reqs{color:var(--muted);font-size:10px}
+    .tt-exposure{display:flex;align-items:center;gap:4px;margin-top:5px;padding-top:5px;border-top:1px solid var(--border2);font-size:10px}
+    .tt-exposure-high{color:rgb(var(--danger-rgb))}
+    .tt-exposure-medium{color:rgb(var(--warning-rgb))}
+    .tt-exposure svg{flex-shrink:0}
+
+    /* Legend */
+    .legend{position:absolute;bottom:14px;left:14px;display:flex;flex-wrap:wrap;gap:5px;max-width:360px}
+    .lpill{
+      display:flex;align-items:center;gap:5px;padding:4px 10px 4px 7px;
+      border-radius:20px;background:var(--surface1);
+      border:1px solid var(--border2);font-size:10px;color:var(--muted2);
+      box-shadow:0 1px 4px rgba(var(--accent-rgb),.1);
+      transition:all .15s;cursor:default;
+    }
+    .lpill:hover{color:var(--text);border-color:var(--border3);box-shadow:var(--shadow)}
+    .ldot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+
+    /* Timeline */
+    #timeline-wrap{
+      height:62px;flex-shrink:0;background:var(--s1);
+      border-top:1px solid var(--border);padding:6px 16px 4px;
+      position:relative;overflow:hidden;
+    }
+    .tl-label{
+      position:absolute;top:6px;left:16px;
+      font-size:8px;font-weight:700;text-transform:uppercase;
+      letter-spacing:.09em;color:var(--muted);
+    }
+    #tl-canvas{width:100%;height:100%;display:block}
+
+    /* ── Table (now a mode within graph-view, not a separate destination) ── */
+    #table-view{flex:1;overflow-y:auto;padding:18px 20px;background:var(--bg)}
+    table{width:100%;border-collapse:collapse;font-size:12px;background:var(--s1);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+    th{
+      text-align:left;font-size:9px;font-weight:700;text-transform:uppercase;
+      letter-spacing:.07em;color:var(--muted);padding:10px 12px;
+      border-bottom:1px solid var(--border2);background:var(--s2);cursor:pointer;
+      user-select:none;transition:background .12s;
+    }
+    th:hover{background:var(--s3)}
+    th.sort-asc::after{content:' ↑'}
+    th.sort-desc::after{content:' ↓'}
+    td{
+      padding:7px 12px;border-bottom:1px solid var(--border);
+      font-family:monospace;color:var(--muted2);white-space:nowrap;
+      overflow:hidden;text-overflow:ellipsis;max-width:200px;
+    }
+    td.nm{font-family:system-ui;color:var(--text)}
+    tbody tr{cursor:pointer}
+    tr:hover td{background:rgba(var(--accent-rgb),.03)}
+    tbody tr.tbl-row-selected td{background:rgba(var(--accent-rgb),.08)}
+    tr:last-child td{border-bottom:none}
+    .tbl-reqcount{font-family:system-ui;color:var(--text);font-weight:600}
+    .tbl-exposure-badge{display:inline-flex;align-items:center;vertical-align:-1.5px;margin-right:5px}
+    .tbl-exposure-high{color:rgb(var(--danger-rgb))}
+    .tbl-exposure-medium{color:rgb(var(--warning-rgb))}
+
+    /* ── Detail panel ────────────────────────────────────────────────────── */
+    .detail{
+      width:350px;flex-shrink:0;background:var(--s1);
+      border-left:1px solid var(--border2);
+      display:flex;flex-direction:column;overflow:hidden;
+      box-shadow:-2px 0 12px rgba(var(--accent-rgb),.05);
+    }
+    .detail-empty{
+      flex:1;display:flex;flex-direction:column;
+      align-items:center;justify-content:center;
+      gap:14px;color:var(--muted);font-size:12px;text-align:center;padding:28px;
+    }
+    .detail-empty-icon{font-size:36px;opacity:.2}
+    .detail-empty-hint{font-size:11px;color:var(--muted);line-height:1.65;max-width:190px}
+
+    .detail-head{
+      padding:16px 16px 14px;border-bottom:1px solid var(--border2);
+      flex-shrink:0;
+      background:linear-gradient(135deg,var(--s3) 0%,var(--s1) 100%);
+      position:relative;overflow:hidden;
+    }
+    .detail-head::before{
+      content:'';position:absolute;top:0;left:0;right:0;height:3px;
+      background:var(--dh-accent,linear-gradient(90deg,transparent,var(--accent),transparent));
+      opacity:.7;
+    }
+    .d-domain{font-family:monospace;font-size:13px;font-weight:700;word-break:break-all;margin-bottom:2px;color:var(--accent2)}
+    .d-org{font-size:11px;color:var(--muted2);margin-bottom:9px}
+    .d-badges{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+
+    .detail-scroll{flex:1;overflow-y:auto;padding:0 0 16px;display:flex;flex-direction:column}
+
+    /* Badges */
+    .badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;border:1px solid transparent}
+    .badge-Advertising   {background:rgba(var(--warning-rgb),.14);color:rgb(var(--warning-rgb));border-color:rgba(var(--warning-rgb),.3)}
+    .badge-Analytics     {background:rgba(var(--info-rgb),.14);color:rgb(var(--info-rgb));border-color:rgba(var(--info-rgb),.3)}
+    .badge-Social        {background:rgba(var(--social-rgb),.14);color:rgb(var(--social-rgb));border-color:rgba(var(--social-rgb),.3)}
+    .badge-Fingerprinting{background:rgba(var(--fingerprint-rgb),.14);color:rgb(var(--fingerprint-rgb));border-color:rgba(var(--fingerprint-rgb),.3)}
+    .badge-Cryptomining  {background:rgba(var(--danger-strong-rgb),.14);color:rgb(var(--danger-strong-rgb));border-color:rgba(var(--danger-strong-rgb),.3)}
+    .badge-Content       {background:rgba(var(--slate-rgb),.14);color:rgb(var(--slate-rgb));border-color:rgba(var(--slate-rgb),.3)}
+    .badge-Anti-fraud    {background:rgba(var(--teal-rgb),.14);color:rgb(var(--teal-rgb));border-color:rgba(var(--teal-rgb),.3)}
+    .badge-Consent       {background:rgba(var(--amber-rgb),.14);color:rgb(var(--amber-rgb));border-color:rgba(var(--amber-rgb),.3)}
+    .badge-first-party   {background:rgba(var(--success-rgb),.14);color:rgb(var(--success-rgb));border-color:rgba(var(--success-rgb),.3)}
+    .badge-third-party   {background:rgba(var(--slate-rgb),.14);color:rgb(var(--slate-rgb));border-color:rgba(var(--slate-rgb),.3)}
+
+    /* Collapsible sections */
+    .dsec{border-bottom:1px solid var(--border)}
+    .dsec-hd{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;cursor:pointer;user-select:none;transition:background .12s}
+    .dsec-hd:hover{background:rgba(var(--accent-rgb),.04)}
+    .dsec-title{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.09em;color:var(--muted2);display:flex;align-items:center;gap:6px}
+    .dsec-title-count{background:var(--s3);color:var(--muted2);font-size:9px;padding:1px 5px;border-radius:8px;border:1px solid var(--border)}
+    .dsec-arrow{color:var(--muted);font-size:10px;transition:transform .2s;flex-shrink:0}
+    .dsec.open .dsec-arrow{transform:rotate(90deg)}
+    .dsec-body{display:none;padding:0 14px 12px}
+    .dsec.open .dsec-body{display:block}
+
+    /* Flags card */
+    .flags-card{border-radius:8px;border:1px solid var(--border2);overflow:hidden;background:var(--s2)}
+    .risk-flags{padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+    .risk-flag{font-size:11px;color:var(--text2);display:flex;align-items:flex-start;gap:7px;line-height:1.5}
+    .risk-flag-icon{flex-shrink:0;font-style:normal}
+
+    /* Findings card */
+    .findings-card{border-radius:8px;border:1px solid rgba(var(--danger-rgb),.28);overflow:hidden;background:rgba(var(--danger-rgb),.06)}
+    .findings-head{display:flex;align-items:center;gap:7px;padding:8px 11px;border-bottom:1px solid rgba(var(--danger-rgb),.28);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:rgb(var(--danger-rgb))}
+    .findings-list{padding:8px 11px;display:flex;flex-direction:column;gap:6px}
+    .finding-item{font-size:11px;color:var(--text2);display:flex;align-items:flex-start;gap:7px;line-height:1.5}
+
+    /* Mitigation card */
+    .mitigate-card{margin-top:8px;padding:10px 12px;border-radius:8px;background:rgba(var(--info-rgb),.08);border:1px solid rgba(var(--info-rgb),.28)}
+    .mitigate-title{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:rgb(var(--info-rgb));margin-bottom:7px;display:flex;align-items:center;gap:5px}
+    .mitigate-tips{display:flex;flex-direction:column;gap:5px}
+    .mitigate-tip{font-size:11px;color:var(--text2);display:flex;align-items:flex-start;gap:7px;line-height:1.5}
+    .mitigate-tip-icon{flex-shrink:0;font-style:normal}
+
+    /* Protect section (now folded into the Insights overlay) */
+    .protect-inner{max-width:700px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+    .protect-section{border-radius:14px;background:var(--s1);border:1px solid var(--border2);overflow:hidden;box-shadow:var(--shadow)}
+    .protect-section-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+    .protect-section-icon{font-size:20px}
+    .protect-section-title{font-size:14px;font-weight:700;color:var(--text)}
+    .protect-section-sub{font-size:11px;color:var(--muted2);margin-top:2px}
+    .protect-tips-list{padding:14px 18px;display:flex;flex-direction:column;gap:10px}
+    .protect-tip{display:flex;align-items:flex-start;gap:12px;padding:11px 13px;border-radius:10px;background:var(--s2);border:1px solid var(--border)}
+    .protect-tip-icon{font-size:22px;flex-shrink:0;line-height:1}
+    .protect-tip-title{font-size:12px;font-weight:700;color:var(--text);margin-bottom:3px}
+    .protect-tip-desc{font-size:11px;color:var(--muted2);line-height:1.6}
+    .protect-tip-link{display:inline-block;margin-top:5px;font-size:10px;color:var(--accent);text-decoration:none;font-weight:600;border-bottom:1px solid rgba(var(--accent-rgb),.3)}
+    .protect-tip-link:hover{color:var(--accent2);border-bottom-color:var(--accent2)}
+
+    /* Explanation card */
+    .explain-card{padding:11px 13px;border-radius:8px;background:rgba(var(--info-rgb),.08);border:1px solid rgba(var(--info-rgb),.28);font-size:11px;color:var(--text2);line-height:1.7}
+
+    /* Requests */
+    .req-list{display:flex;flex-direction:column;gap:3px}
+    .req-item{border-radius:8px;background:var(--s2);border:1px solid var(--border);overflow:hidden;cursor:pointer;transition:border-color .12s,box-shadow .12s}
+    .req-item:hover{border-color:var(--border3);box-shadow:var(--shadow)}
+    .req-item-hd{display:flex;align-items:center;gap:6px;padding:7px 10px;font-size:11px;font-family:monospace;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .req-item-body{display:none;padding:9px 11px;border-top:1px solid var(--border);font-size:10px;color:var(--text2);line-height:1.65;background:var(--s3)}
+    .req-item.open .req-item-body{display:block}
+    .rtype{font-size:9px;font-weight:700;text-transform:uppercase;background:var(--s3);border:1px solid var(--border2);padding:2px 5px;border-radius:4px;font-family:system-ui;color:var(--text2);flex-shrink:0}
+
+    /* Cookies */
+    .ck-list{display:flex;flex-direction:column;gap:5px}
+    .ck-item{border-radius:8px;background:var(--s2);border:1px solid var(--border);overflow:hidden;cursor:pointer;transition:border-color .12s,box-shadow .12s}
+    .ck-item:hover{border-color:var(--border3);box-shadow:var(--shadow)}
+    .ck-item-hd{display:flex;align-items:center;justify-content:space-between;padding:9px 11px}
+    .ck-item.open .ck-item-body{display:block}
+    .ck-item-body{display:none;padding:9px 11px;border-top:1px solid var(--border);font-size:10px;color:var(--text2);line-height:1.65;background:var(--s3)}
+    .ck-name{font-family:monospace;font-size:12px;font-weight:600;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ck-flags{display:flex;gap:3px;flex-wrap:wrap}
+    .flag{font-size:9px;padding:2px 6px;border-radius:4px;background:var(--s3);color:var(--muted2);border:1px solid var(--border)}
+    .fg{background:rgba(var(--success-rgb),.14);color:rgb(var(--success-rgb));border-color:rgba(var(--success-rgb),.3)}    /* protective — green */
+    .fw{background:rgba(var(--warning-rgb),.14);color:rgb(var(--warning-rgb));border-color:rgba(var(--warning-rgb),.3)}    /* concern — orange */
+    .fi{background:rgba(var(--info-rgb),.14);color:rgb(var(--info-rgb));border-color:rgba(var(--info-rgb),.3)}    /* neutral — blue */
+    .fv{background:rgba(var(--social-rgb),.14);color:rgb(var(--social-rgb));border-color:rgba(var(--social-rgb),.3)}    /* advertising — purple */
+    .fn{background:rgba(var(--slate-rgb),.14);color:rgb(var(--slate-rgb));border-color:rgba(var(--slate-rgb),.3)}    /* neutral gray */
+
+    .prov-note{margin:0 14px;padding:9px 11px;border-radius:8px;background:var(--s2);border:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.65}
+    .prov-note strong{color:var(--muted2)}
+
+    /* ── Organizations view ──────────────────────────────────────────────── */
+    #orgs-view{display:none;flex:1;overflow-y:auto;padding:18px 20px;background:var(--bg)}
+    #orgs-view.active{display:block}
+    #trend-inner{max-width:840px;margin:0 auto 16px}
+    #orgs-panel{display:flex;flex-direction:column;gap:10px;max-width:840px;margin:0 auto}
+
+    .org-card{
+      border-radius:14px;background:var(--s1);border:1px solid var(--border2);
+      overflow:hidden;transition:border-color .15s,box-shadow .15s;
+      box-shadow:var(--shadow);
+    }
+    .org-card:hover{border-color:var(--border3);box-shadow:var(--shadow2)}
+    .org-card-hd{display:flex;align-items:center;cursor:pointer;user-select:none;min-height:58px;transition:background .12s}
+    .org-card-hd:hover{background:rgba(var(--accent-rgb),.03)}
+    .org-color-bar{width:4px;align-self:stretch;flex-shrink:0}
+    .org-card-main{flex:1;padding:13px 15px}
+    .org-card-top{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+    .org-name{font-size:14px;font-weight:700;color:var(--text)}
+    .org-chips{display:flex;gap:5px;flex-wrap:wrap}
+    .org-chip{font-size:10px;padding:2px 8px;border-radius:10px;background:var(--s3);color:var(--muted2);border:1px solid var(--border)}
+    .org-chip-warn{background:rgba(var(--warning-rgb),.14);color:rgb(var(--warning-rgb));border-color:rgba(var(--warning-rgb),.3)}
+    .org-card-body{display:none;padding:14px 16px 16px;border-top:1px solid var(--border);background:var(--s2)}
+    .org-card.open .org-card-body{display:block}
+    .org-card.open .dsec-arrow{transform:rotate(90deg)}
+    .org-card-hd .dsec-arrow{padding:0 16px;transition:transform .2s;color:var(--muted)}
+    .org-explain{font-size:11px;color:var(--text2);line-height:1.65;margin-bottom:14px;padding:10px 12px;border-radius:8px;background:rgba(var(--info-rgb),.08);border:1px solid rgba(var(--info-rgb),.28)}
+    .org-section-label{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:7px;margin-top:10px}
+    .org-section-label:first-child{margin-top:0}
+    .org-domain-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px}
+    .org-domain-row:last-of-type{border-bottom:none}
+    .org-domain-name{font-family:monospace;color:var(--text)}
+    .org-domain-reqs{color:var(--muted);font-size:10px;flex-shrink:0}
+    .org-cookie-row{padding:5px 0;border-bottom:1px solid var(--border)}
+    .org-cookie-row:last-child{border-bottom:none}
+
+    /* ── Story overlay ───────────────────────────────────────────────────── */
+    #story-overlay{
+      display:none;position:fixed;inset:0;z-index:100;
+      background:rgba(0,0,0,0.55);backdrop-filter:blur(8px);
+      align-items:flex-start;justify-content:center;
+      padding:60px 24px;overflow-y:auto;
+    }
+    .story-inner{
+      width:100%;max-width:680px;background:var(--s1);
+      border:1px solid var(--border2);border-radius:16px;
+      padding:32px 36px;box-shadow:0 24px 80px rgba(0,0,0,.35),0 4px 20px rgba(0,0,0,.2);
+    }
+    .story-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+    .story-title{font-size:16px;font-weight:700;color:var(--text)}
+    .story-close{background:var(--s2);border:1px solid var(--border2);border-radius:7px;color:var(--muted2);cursor:pointer;padding:5px 12px;font-size:11px;font-weight:600;transition:all .15s}
+    .story-close:hover{background:var(--s3);color:var(--text)}
+    .story-body{font-size:13px;color:var(--text2);line-height:1.78}
+    .story-body strong{color:var(--text);font-weight:700}
+    .story-body em{opacity:.6;font-style:italic}
+    .story-body p{margin:0 0 10px}
+    .story-prov{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);font-style:italic;line-height:1.6}
+
+    /* ── Misc ────────────────────────────────────────────────────────────── */
+    .empty-msg{color:var(--muted);font-size:13px;padding:60px;text-align:center}
+    ::-webkit-scrollbar{width:5px}
+    ::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:rgba(99,120,200,.15);border-radius:5px}
+    ::-webkit-scrollbar-thumb:hover{background:rgba(99,120,200,.28)}
+
+    /* ── Animations ──────────────────────────────────────────────────────── */
+    @keyframes fadeSlideIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes statPop{0%{transform:scale(1)}40%{transform:scale(1.15)}100%{transform:scale(1)}}
+
+    .org-card{animation:fadeSlideIn .2s ease both}
+    .org-card:nth-child(1){animation-delay:.02s}
+    .org-card:nth-child(2){animation-delay:.05s}
+    .org-card:nth-child(3){animation-delay:.08s}
+    .org-card:nth-child(4){animation-delay:.11s}
+    .org-card:nth-child(5){animation-delay:.14s}
+    .org-card:nth-child(6){animation-delay:.17s}
+    .org-card:nth-child(n+7){animation-delay:.20s}
+    .stat-pop{animation:statPop .28s ease}
+    .detail-head{animation:fadeSlideIn .16s ease both}
+    .protect-tip{animation:fadeSlideIn .18s ease both}
+    .protect-tip:nth-child(1){animation-delay:.04s}
+    .protect-tip:nth-child(2){animation-delay:.08s}
+    .protect-tip:nth-child(3){animation-delay:.12s}
+    .protect-tip:nth-child(4){animation-delay:.16s}
+    .protect-tip:nth-child(5){animation-delay:.20s}
+
+    /* Keyboard shortcut hints */
+    .shortcut-bar{position:fixed;bottom:14px;right:14px;background:var(--surface1);border:1px solid var(--border2);border-radius:10px;padding:8px 12px;font-size:10px;color:var(--muted);display:none;gap:10px;flex-wrap:wrap;max-width:320px;box-shadow:var(--shadow);backdrop-filter:blur(8px)}
+    .shortcut-bar.show{display:flex}
+    .sk{display:flex;align-items:center;gap:4px}
+    .sk kbd{background:var(--s3);border:1px solid var(--border2);border-radius:4px;padding:1px 5px;font-size:9px;font-family:monospace;color:var(--text2)}
+  </style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo-mark">
+    <svg class="logo-icon" width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="logoGrad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="rgb(var(--accent-rgb))"/>
+          <stop offset="55%" stop-color="rgb(var(--social-rgb))"/>
+          <stop offset="100%" stop-color="rgb(var(--fingerprint-rgb))"/>
+        </linearGradient>
+      </defs>
+      <circle cx="10" cy="10" r="7" stroke="url(#logoGrad)" stroke-width="2"/>
+      <line x1="15" y1="15" x2="21" y2="21" stroke="url(#logoGrad)" stroke-width="2" stroke-linecap="round"/>
+      <path d="M7 8 12 7 9 13 7 8 12 7" stroke="url(#logoGrad)" stroke-width="1" stroke-linejoin="round" opacity=".55"/>
+      <circle cx="7" cy="8" r="1.3" fill="url(#logoGrad)"/>
+      <circle cx="12" cy="7" r="1.3" fill="url(#logoGrad)"/>
+      <circle cx="9" cy="13" r="1.3" fill="url(#logoGrad)"/>
+    </svg>
+    <span class="logo">WebLens</span>
+  </div>
+  <div class="divider"></div>
+  <div class="session-wrap">
+    <select id="sessionSelect"><option>Loading…</option></select>
+    <span class="sarrow">▾</span>
+  </div>
+  <div class="divider"></div>
+  <div class="search-wrap">
+    <span class="sicon">⌕</span>
+    <input id="searchInput" type="text" placeholder="Filter domains…" autocomplete="off"/>
+  </div>
+  <div class="stats" title="Session totals — see the sentence above the graph for the same numbers in plain English">
+    <span class="stat"><span class="n" id="sReqs">—</span><span class="l">reqs</span></span>
+    <span class="stat-sep">·</span>
+    <span class="stat"><span class="n" id="sDoms">—</span><span class="l">domains</span></span>
+    <span class="stat-sep">·</span>
+    <span class="stat s-warn"><span class="n" id="s3rd">—</span><span class="l">3rd-party</span></span>
+    <span class="stat-sep">·</span>
+    <span class="stat s-danger" id="stat-trk"><span class="n" id="sTrk">—</span><span class="l">trackers</span></span>
+  </div>
+  <div class="vtabs">
+    <button class="vtab active" data-view="graph">Graph</button>
+    <button class="vtab" data-view="orgs">Organizations</button>
+  </div>
+  <button class="topbar-btn" id="btnInsights"></button>
+  <button class="topbar-btn" id="btnTheme" title="Theme"></button>
+  <button class="topbar-btn" id="btnSettings" title="History &amp; block settings"></button>
+</div>
+
+<div class="main">
+  <div id="graph-view">
+    <div class="hero-line">
+      <div class="hero-line-text" id="heroLine"><span class="skel" style="width:70%;height:15px;display:inline-block"></span></div>
+      <button id="btnReplay" title="Replay this session's requests in the order they happened"></button>
+    </div>
+    <div id="graph-area">
+      <div id="graph-mode-toggle" class="mode-toggle">
+        <button class="mode-btn active" data-mode="map" title="Bubble map"></button>
+        <button class="mode-btn" data-mode="table" title="Table"></button>
+      </div>
+      <div id="cy-wrap">
+        <div id="cy"></div>
+        <div id="tooltip"></div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div id="table-view">
+      <p class="empty-msg" id="tl-loading">Loading…</p>
+      <table id="req-table" style="display:none">
+        <thead><tr>
+          <th data-col="domain">Domain</th>
+          <th data-col="organization">Organization</th>
+          <th data-col="category">Category</th>
+          <th data-col="party">Party</th>
+          <th data-col="requests">Requests</th>
+          <th data-col="status">Status</th>
+        </tr></thead>
+        <tbody id="tbl-body"></tbody>
+      </table>
+      </div>
+    </div>
+    <div id="timeline-wrap">
+      <span class="tl-label">Request timeline</span>
+      <canvas id="tl-canvas"></canvas>
+    </div>
+  </div>
+
+  <div class="detail" id="detail">
+    <div class="detail-empty">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="12" cy="12" r="3"/><circle cx="4" cy="6" r="2"/><circle cx="20" cy="6" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><line x1="6" y1="6" x2="10" y2="11"/><line x1="18" y1="6" x2="14" y2="11"/><line x1="6" y1="18" x2="10" y2="13"/><line x1="18" y1="18" x2="14" y2="13"/></svg>
+      <span>Click any node to explore</span>
+      <div class="detail-empty-hint">See what each domain does, what data it may collect, and how to protect yourself.</div>
+    </div>
+  </div>
+
+  <div id="orgs-view">
+    <div id="trend-inner"></div>
+    <div id="orgs-panel"></div>
+  </div>
+</div>
+
+<div class="app-footer">Built by Freemware</div>
+
+<!-- Insights overlay — Story + Findings + Protect, merged into one place -->
+<div id="story-overlay" style="display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);align-items:flex-start;justify-content:center;padding:60px 24px;overflow-y:auto">
+  <div class="story-inner">
+    <div class="story-header">
+      <div class="story-title">Insights</div>
+      <button class="story-close" id="btnStoryClose">Close</button>
+    </div>
+    <div class="story-body" id="story-body"></div>
+    <div class="story-prov">Provenance: Explained — narrative built from Observed and Classified data captured by WebLens. No data was sent to any server to generate this.</div>
+  </div>
+</div>
+
+<!-- Settings overlay (M5) -->
+<div id="settings-overlay" style="display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);align-items:flex-start;justify-content:center;padding:60px 24px;overflow-y:auto">
+  <div class="story-inner">
+    <div class="story-header">
+      <div class="story-title" id="settings-title">Settings</div>
+      <button class="story-close" id="btnSettingsClose">Close</button>
+    </div>
+    <div class="story-body" id="settings-body"></div>
+  </div>
+</div>
+
+<!-- Verify overlay (M6 — Verify & Protect) -->
+<div id="verify-overlay" style="display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);align-items:flex-start;justify-content:center;padding:60px 24px;overflow-y:auto">
+  <div class="story-inner">
+    <div class="story-header">
+      <div class="story-title" id="verify-title">Verify</div>
+      <button class="story-close" id="btnVerifyClose">Close</button>
+    </div>
+    <div class="story-body" id="verify-body"></div>
+  </div>
+</div>
+
+<!-- Data Journey replay overlay (v0.11.0) -->
+<div id="journey-overlay" style="display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);align-items:flex-start;justify-content:center;padding:60px 24px;overflow-y:auto">
+  <div class="story-inner">
+    <div class="story-header">
+      <div class="story-title" id="journey-title">Data Journey</div>
+      <button class="story-close" id="btnJourneyClose">Close</button>
+    </div>
+    <div class="story-body" id="journey-body"></div>
+    <div class="story-prov">Provenance: Observed — built entirely from request timestamps WebLens already captured for this session. Playback timing is scaled to fit the panel; relative order is unchanged.</div>
+  </div>
+</div>
+
+<!-- Keyboard shortcut hint bar -->
+<div class="shortcut-bar" id="shortcutBar">
+  <div class="sk"><kbd>G</kbd> Graph</div>
+  <div class="sk"><kbd>O</kbd> Organizations</div>
+  <div class="sk"><kbd>I</kbd> Insights</div>
+  <div class="sk"><kbd>/</kbd> Search</div>
+  <div class="sk"><kbd>Esc</kbd> Close</div>
+</div>
+
+<script src="cytoscape.min.js"></script>
+<script src="dashboard.js" type="module"></script>
+</body>
+</html>

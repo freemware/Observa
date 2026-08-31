@@ -1,0 +1,115 @@
+/* WebLens shared design tokens — used by both popup and dashboard so they
+   read as one product instead of two. Default theme is dark; a real toggle
+   (persisted via settings.js's `theme` field) can flip to light by setting
+   data-theme="light" on <html> — see ui/theme.js. */
+
+:root {
+  /* ── Structural chrome — flips between themes ─────────────────────────── */
+  --bg:       #090c14;
+  --surface1: #10141f;   /* topbar, cards, popup body panels */
+  --surface2: #141a29;   /* secondary fill, hover rows */
+  --surface3: #1a2032;   /* tertiary fill, badge backgrounds */
+  --border:   rgba(255,255,255,.07);
+  --border2:  rgba(255,255,255,.13);
+  --border3:  rgba(255,255,255,.22);
+  --text:     #e8ecf6;
+  --text2:    #b6c0d6;
+  --muted:    rgba(232,236,246,.42);
+  --muted2:   rgba(232,236,246,.62);
+  --accent:   #5b7cfa;
+  --accent2:  #8298ff;
+  --shadow:   0 1px 4px rgba(0,0,0,.35), 0 4px 20px rgba(0,0,0,.28);
+  --shadow2:  0 2px 14px rgba(0,0,0,.4), 0 10px 36px rgba(0,0,0,.32);
+
+  /* ── Radii / spacing — one scale for both surfaces ─────────────────────── */
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 13px;
+  --radius-xl: 16px;
+
+  /* ── Semantic / category colors — same hue in both themes; only the
+     surface they sit on changes, so a single set works everywhere. Used as
+     RGB triples so callers can pick their own alpha: rgba(var(--danger-rgb),.15) */
+  --accent-rgb:      91,124,250;   /* brand blue */
+  --danger-rgb:      248,113,113;  /* blocked / high severity / cryptomining */
+  --danger-strong-rgb: 239,68,68;  /* solid danger fills (e.g. destructive button) */
+  --warning-rgb:     251,146,60;   /* advertising / medium severity / caveats */
+  --success-rgb:     74,222,128;   /* protective / first-party / good */
+  --info-rgb:        96,165,250;   /* analytics / neutral-active */
+  --social-rgb:      168,85,247;   /* social category */
+  --fingerprint-rgb: 236,72,153;   /* fingerprinting category */
+  --teal-rgb:        20,184,166;   /* anti-fraud category */
+  --amber-rgb:       234,179,8;    /* consent category */
+  --slate-rgb:       148,163,184;  /* content / unclassified / neutral-low */
+}
+
+/* System preference drives it when the user hasn't chosen explicitly */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg:       #f0f4ff;
+    --surface1: #ffffff;
+    --surface2: #f7f9ff;
+    --surface3: #eef2fd;
+    --border:   rgba(99,120,200,.10);
+    --border2:  rgba(99,120,200,.20);
+    --border3:  rgba(99,120,200,.32);
+    --text:     #111827;
+    --text2:    #374151;
+    --muted:    rgba(55,65,81,.45);
+    --muted2:   rgba(55,65,81,.65);
+    --accent:   #4f6ef7;
+    --accent2:  #3b55e6;
+    --shadow:   0 1px 4px rgba(79,110,247,.07), 0 4px 20px rgba(79,110,247,.06);
+    --shadow2:  0 2px 12px rgba(79,110,247,.10), 0 8px 32px rgba(79,110,247,.08);
+  }
+}
+
+/* Explicit user choice always wins over system preference */
+:root[data-theme="light"] {
+  --bg:       #f0f4ff;
+  --surface1: #ffffff;
+  --surface2: #f7f9ff;
+  --surface3: #eef2fd;
+  --border:   rgba(99,120,200,.10);
+  --border2:  rgba(99,120,200,.20);
+  --border3:  rgba(99,120,200,.32);
+  --text:     #111827;
+  --text2:    #374151;
+  --muted:    rgba(55,65,81,.45);
+  --muted2:   rgba(55,65,81,.65);
+  --accent:   #4f6ef7;
+  --accent2:  #3b55e6;
+  --shadow:   0 1px 4px rgba(79,110,247,.07), 0 4px 20px rgba(79,110,247,.06);
+  --shadow2:  0 2px 12px rgba(79,110,247,.10), 0 8px 32px rgba(79,110,247,.08);
+}
+
+:root[data-theme="dark"] {
+  --bg:       #090c14;
+  --surface1: #10141f;
+  --surface2: #141a29;
+  --surface3: #1a2032;
+  --border:   rgba(255,255,255,.07);
+  --border2:  rgba(255,255,255,.13);
+  --border3:  rgba(255,255,255,.22);
+  --text:     #e8ecf6;
+  --text2:    #b6c0d6;
+  --muted:    rgba(232,236,246,.42);
+  --muted2:   rgba(232,236,246,.62);
+  --accent:   #5b7cfa;
+  --accent2:  #8298ff;
+  --shadow:   0 1px 4px rgba(0,0,0,.35), 0 4px 20px rgba(0,0,0,.28);
+  --shadow2:  0 2px 14px rgba(0,0,0,.4), 0 10px 36px rgba(0,0,0,.32);
+}
+
+.wl-icon { flex-shrink: 0; vertical-align: -2px; display: inline-block; }
+
+/* ── Skeleton loading shimmer — shared by popup + dashboard ──────────────── */
+@keyframes weblensShimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
+.skel {
+  display: inline-block;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface2) 0%, var(--surface3) 50%, var(--surface2) 100%);
+  background-size: 200px 100%;
+  animation: weblensShimmer 1.3s ease-in-out infinite;
+  color: transparent !important;
+}

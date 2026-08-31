@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebLens</title>
+    <link rel="stylesheet" href="../theme.css"/>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      body {
+        width: 380px; margin: 0; padding: 0;
+        font: 13px/1.5 system-ui, sans-serif;
+        background: var(--bg); color: var(--text);
+      }
+
+      /* Header */
+      .header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 12px 14px 10px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface1);
+        gap: 8px;
+      }
+      .logo {
+        font-size: 15px; font-weight: 900; letter-spacing: -.02em;
+        background: linear-gradient(135deg,rgb(var(--accent-rgb)) 0%,rgb(var(--social-rgb)) 55%,rgb(var(--fingerprint-rgb)) 100%);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      }
+      /* Same lens-with-tracker-graph mark as the dashboard topbar, same
+         3-stop gradient as the wordmark (was hardcoded hex here before —
+         switched to the shared theme tokens above so both read as one
+         brand, and both actually respond to light/dark theme). */
+      .logo-mark { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+      .logo-icon { flex-shrink: 0; }
+      .header-actions { display: flex; align-items: center; gap: 6px; }
+      .btn-icon {
+        display: flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; padding: 0; border-radius: var(--radius-sm);
+        border: 1px solid var(--border2); background: var(--surface2);
+        color: var(--text2); cursor: pointer; transition: all .15s;
+      }
+      .btn-icon:hover { background: var(--surface3); color: var(--text); }
+      .btn-dashboard {
+        font-size: 11px; padding: 4px 10px; border-radius: var(--radius-sm);
+        border: 1px solid var(--border2); background: rgba(var(--accent-rgb),.12);
+        color: var(--accent2); cursor: pointer; font-weight: 600;
+        transition: all .15s; display: inline-flex; align-items: center; gap: 5px;
+      }
+      .btn-dashboard:hover { background: rgba(var(--accent-rgb),.22); color: var(--text); }
+
+      /* Page URL */
+      .pageurl {
+        margin: 0; padding: 6px 14px;
+        background: var(--surface2);
+        border-bottom: 1px solid var(--border);
+        font-size: 11px; color: var(--muted);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+
+      /* Quick summary strip */
+      .summary-strip {
+        display: grid; grid-template-columns: repeat(4,1fr);
+        gap: 0; border-bottom: 1px solid var(--border);
+      }
+      .sum-cell {
+        padding: 10px 6px; text-align: center;
+        border-right: 1px solid var(--border);
+      }
+      .sum-cell:last-child { border-right: none; }
+      .sum-n { font-size: 20px; font-weight: 800; line-height: 1; letter-spacing: -.03em; color: var(--text); }
+      .sum-n.warn  { color: rgb(var(--warning-rgb)); }
+      .sum-n.danger{ color: rgb(var(--danger-rgb)); }
+      .sum-n.skel  { width: 28px; height: 18px; margin: 0 auto; }
+      .sum-l { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
+
+      /* Tabs */
+      .tabs {
+        display: flex; border-bottom: 1px solid var(--border);
+        padding: 0 14px; gap: 2px; background: var(--surface1);
+      }
+      .tab {
+        padding: 7px 10px 8px; font-size: 11px; font-weight: 600;
+        cursor: pointer; border: none; background: none; color: var(--muted);
+        border-bottom: 2px solid transparent; margin-bottom: -1px;
+        transition: all .15s; display: inline-flex; align-items: center; gap: 5px;
+      }
+      .tab.active { color: var(--accent2); border-bottom-color: var(--accent); }
+      .tab:hover:not(.active) { color: var(--text); }
+
+      .panel { display: none; }
+      .panel.active { display: block; }
+
+      /* Findings banner */
+      /* Banner severity levels */
+      .findings-banner {
+        margin: 8px 12px 0; padding: 9px 12px;
+        border-radius: var(--radius-md); font-size: 11px;
+      }
+      .findings-banner.sev-red {
+        background: rgba(var(--danger-rgb),.08); border: 1px solid rgba(var(--danger-rgb),.3); color: rgb(var(--danger-rgb));
+      }
+      .findings-banner.sev-orange {
+        background: rgba(var(--warning-rgb),.07); border: 1px solid rgba(var(--warning-rgb),.25); color: rgb(var(--warning-rgb));
+      }
+      .findings-banner.sev-clear {
+        background: rgba(var(--success-rgb),.06); border: 1px solid rgba(var(--success-rgb),.2); color: rgb(var(--success-rgb));
+      }
+      .findings-banner-title { font-weight: 700; margin-bottom: 3px; display: flex; align-items: center; gap: 5px; }
+      .findings-banner-sub { font-size: 10px; opacity: .75; line-height: 1.5; margin-top: 3px; }
+
+      /* Section title */
+      .section-title {
+        font-size: 9px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: .08em; color: var(--muted);
+        padding: 10px 14px 5px; margin: 0;
+      }
+
+      /* Domain list */
+      .domain-list { margin: 0 0 4px; padding: 0 12px; list-style: none; max-height: 195px; overflow-y: auto; }
+      .domain-item {
+        padding: 5px 4px; border-bottom: 1px solid var(--border);
+        display: grid; grid-template-columns: 1fr auto auto;
+        gap: 6px; align-items: center; font-size: 12px;
+      }
+      .domain-item:last-child { border-bottom: none; }
+      .domain-name { font-family: monospace; word-break: break-all; min-width: 0; }
+      .domain-org  { opacity: .45; font-size: 10px; }
+      .count { opacity: .3; font-size: 11px; }
+
+      /* Badges */
+      .badge {
+        font-size: 9px; padding: 2px 6px; border-radius: 10px;
+        white-space: nowrap; font-weight: 700; flex-shrink: 0;
+      }
+      .badge-Advertising   { background:rgba(var(--warning-rgb),.15); color:rgb(var(--warning-rgb)); }
+      .badge-Analytics     { background:rgba(var(--info-rgb),.15);  color:rgb(var(--info-rgb)); }
+      .badge-Social        { background:rgba(var(--social-rgb),.15);  color:rgb(var(--social-rgb)); }
+      .badge-Fingerprinting{ background:rgba(var(--fingerprint-rgb),.15);  color:rgb(var(--fingerprint-rgb)); }
+      .badge-Cryptomining  { background:rgba(var(--danger-rgb),.15);   color:rgb(var(--danger-rgb)); }
+      .badge-Content       { background:rgba(var(--slate-rgb),.13); color:rgb(var(--slate-rgb)); }
+      .badge-Anti-fraud    { background:rgba(var(--teal-rgb),.13);  color:rgb(var(--teal-rgb)); }
+      .badge-Consent       { background:rgba(var(--amber-rgb),.13);   color:rgb(var(--amber-rgb)); }
+      .badge-first  { background:rgba(var(--success-rgb),.1);   color:rgb(var(--success-rgb)); }
+      .badge-third  { background:rgba(var(--slate-rgb),.1); color:rgb(var(--slate-rgb)); }
+      .badge-unknown{ background:rgba(128,128,128,.1); color:#8a8a8a; }
+
+      /* Cookie panel */
+      .ck-summary { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; padding: 4px 12px 8px; }
+      .cstat {
+        padding: 7px 9px; border-radius: var(--radius-md);
+        background: var(--surface2);
+        border: 1px solid var(--border);
+      }
+      .cstat .cv { font-size: 17px; font-weight: 700; line-height: 1; color: var(--text); }
+      .cstat .cv.skel { width: 24px; height: 16px; }
+      .cstat .cl { font-size: 9px; color: var(--muted); margin-top: 2px; }
+
+      .cookie-list { max-height: 185px; overflow-y: auto; padding: 0 12px; }
+      .cookie-row { padding: 6px 0; border-bottom: 1px solid var(--border); }
+      .cookie-row:last-child { border-bottom: none; }
+      .cookie-top { display: flex; align-items: baseline; gap: 6px; }
+      .cookie-name { font-family: monospace; font-size: 12px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+      .cookie-domain-label { opacity: .38; font-size: 10px; flex-shrink: 0; }
+      .cookie-flags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
+      .flag { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: var(--surface3); color: var(--muted2); }
+      /* Flag color system — calibrated severity */
+      .flag-good     { background: rgba(var(--success-rgb),.12);  color: rgb(var(--success-rgb)); }  /* protective: Secure, HttpOnly, SameSite=Strict */
+      .flag-neutral  { background: rgba(var(--info-rgb),.11); color: rgb(var(--info-rgb)); }  /* neutral observed property */
+      .flag-advert   { background: rgba(var(--social-rgb),.12); color: rgb(var(--social-rgb)); }  /* advertising/tracking purpose */
+      .flag-concern  { background: rgba(var(--warning-rgb),.12); color: rgb(var(--warning-rgb)); }  /* privacy consideration */
+      .flag-warn     { background: rgba(var(--danger-rgb),.12);  color: rgb(var(--danger-rgb)); }  /* confirmed bad — reserved */
+      .flag-info     { background: rgba(var(--info-rgb),.11); color: rgb(var(--info-rgb)); }  /* kept for compat */
+      .flag-session  { background: rgba(var(--slate-rgb),.12);color: rgb(var(--slate-rgb)); }  /* session / temporary */
+      .expiry { opacity: .38; font-size: 10px; margin-top: 2px; }
+
+      /* Protect tab */
+      .protect-list { padding: 6px 12px 10px; display: flex; flex-direction: column; gap: 7px; }
+      .protect-item {
+        display: flex; align-items: flex-start; gap: 10px;
+        padding: 9px 11px; border-radius: var(--radius-md);
+        background: var(--surface2); border: 1px solid var(--border);
+      }
+      .protect-icon { flex-shrink: 0; line-height: 1.2; color: var(--text2); }
+      .protect-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+      .protect-desc  { font-size: 10px; color: var(--muted2); line-height: 1.55; }
+
+      /* Footer */
+      .footer {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 8px 14px;
+        border-top: 1px solid var(--border);
+        background: var(--surface1);
+        gap: 8px;
+      }
+      .footer-text { flex: 1; min-width: 0; }
+      .notice { font-size: 9px; color: var(--muted); margin: 0; line-height: 1.4; }
+      .credit { font-size: 8.5px; color: var(--muted); opacity: .55; margin: 2px 0 0; }
+      .btn-clear {
+        font-size: 11px; padding: 4px 9px; border-radius: var(--radius-sm);
+        border: 1px solid var(--border2); background: none;
+        color: var(--muted); cursor: pointer; white-space: nowrap;
+        transition: all .15s;
+      }
+      .btn-clear:hover { color: var(--text); border-color: var(--border3); }
+      #error { color: rgb(var(--danger-rgb)); font-size: 11px; margin: 8px 14px 0; }
+
+      /* Cookie see-more expand */
+      /* Cookie expand */
+      .cookie-row { cursor:pointer; border-radius:var(--radius-sm); transition:background .1s; }
+      .cookie-row:hover { background:var(--surface2); }
+      .cookie-see-more { font-size:9px; color:rgba(var(--accent-rgb),.85); margin-top:4px; display:flex; align-items:center; gap:3px; user-select:none; font-weight:600; }
+      .cookie-row.open .cookie-see-more { display:none; }
+      .cookie-detail { display:none; margin-top:7px; padding:10px 11px; border-radius:var(--radius-md); background:var(--surface2); border:1px solid var(--border); font-size:10px; color:var(--muted2); line-height:1.65; }
+      .cookie-row.open .cookie-detail { display:block; }
+      .cookie-detail-section { margin-bottom:10px; }
+      .cookie-detail-section:last-child { margin-bottom:0; }
+      .cookie-detail-label { font-size:8px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:5px; }
+      .cookie-detail-ok    { color:rgb(var(--success-rgb)); display:flex; align-items:center; gap:5px; font-size:10px; margin-top:5px; }
+      /* Attribute grid */
+      .attr-grid { display:grid; grid-template-columns:auto 1fr; gap:3px 10px; margin-top:4px; }
+      .attr-key  { font-size:9px; color:var(--muted); white-space:nowrap; padding-top:1px; }
+      .attr-val  { font-size:10px; color:var(--text2); line-height:1.5; }
+      /* Evidence section */
+      .evidence-row { display:flex; justify-content:space-between; align-items:center; padding:3px 0; border-bottom:1px solid var(--border); font-size:9px; }
+      .evidence-row:last-child { border-bottom:none; }
+      .evidence-key { color:var(--muted); }
+      .evidence-val { color:var(--text2); font-weight:600; }
+      .evidence-val.classified { color:rgb(var(--info-rgb)); }
+      .evidence-val.observed   { color:rgb(var(--success-rgb)); }
+      .evidence-val.inferred   { color:rgb(var(--warning-rgb)); }
+
+      /* Story panel */
+      #storyContent strong { color:var(--text); }
+      #storyContent em { opacity:.55; font-style:italic; }
+      #storyContent p { margin:0 0 9px; }
+
+      /* Skeleton loading rows, used while the popup's first message round-trip
+         to the service worker is in flight (see popup.js renderSkeleton()). */
+      .skel-row { display:flex; align-items:center; gap:8px; padding:6px 4px; }
+      .skel-line { height:10px; border-radius:var(--radius-sm); }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div class="logo-mark">
+        <svg class="logo-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="logoGrad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="rgb(var(--accent-rgb))"/>
+              <stop offset="55%" stop-color="rgb(var(--social-rgb))"/>
+              <stop offset="100%" stop-color="rgb(var(--fingerprint-rgb))"/>
+            </linearGradient>
+          </defs>
+          <circle cx="10" cy="10" r="7" stroke="url(#logoGrad)" stroke-width="2"/>
+          <line x1="15" y1="15" x2="21" y2="21" stroke="url(#logoGrad)" stroke-width="2" stroke-linecap="round"/>
+          <path d="M7 8 12 7 9 13 7 8 12 7" stroke="url(#logoGrad)" stroke-width="1" stroke-linejoin="round" opacity=".55"/>
+          <circle cx="7" cy="8" r="1.3" fill="url(#logoGrad)"/>
+          <circle cx="12" cy="7" r="1.3" fill="url(#logoGrad)"/>
+          <circle cx="9" cy="13" r="1.3" fill="url(#logoGrad)"/>
+        </svg>
+        <span class="logo">WebLens</span>
+      </div>
+      <div class="header-actions">
+        <button class="btn-icon" id="btnTheme" title="Theme"></button>
+        <button class="btn-dashboard" id="btnDashboard">Full dashboard ↗</button>
+      </div>
+    </div>
+    <p class="pageurl" id="pageUrl">Loading…</p>
+
+    <div class="summary-strip">
+      <div class="sum-cell"><div class="sum-n skel" id="totalRequests">&nbsp;</div><div class="sum-l">Requests</div></div>
+      <div class="sum-cell"><div class="sum-n skel" id="totalDomains">&nbsp;</div><div class="sum-l">Domains</div></div>
+      <div class="sum-cell"><div class="sum-n warn skel" id="thirdPartyCount">&nbsp;</div><div class="sum-l">3rd Party</div></div>
+      <div class="sum-cell"><div class="sum-n danger skel" id="trackerCount">&nbsp;</div><div class="sum-l">Trackers</div></div>
+    </div>
+
+    <div id="findingsBanner" style="margin:0;padding:0"></div>
+
+    <div class="tabs">
+      <button class="tab active" data-panel="requests">Requests</button>
+      <button class="tab" data-panel="cookies">Cookies</button>
+      <button class="tab" data-panel="story" id="tabStory">Story</button>
+      <button class="tab" data-panel="protect" id="tabProtect">Protect</button>
+    </div>
+
+    <div class="panel active" id="panel-requests">
+      <p class="section-title">Domains contacted</p>
+      <ul class="domain-list" id="domainList"></ul>
+      <div id="blockHint" style="display:none;margin:0 12px 8px;padding:7px 10px;border-radius:var(--radius-md);background:rgba(var(--accent-rgb),.08);border:1px solid rgba(var(--accent-rgb),.25);color:var(--accent2);font-size:10px;line-height:1.5"></div>
+    </div>
+
+    <div class="panel" id="panel-cookies">
+      <div class="ck-summary" id="cookieStats"></div>
+      <p class="section-title">Cookie details</p>
+      <div class="cookie-list" id="cookieList"></div>
+    </div>
+
+    <div class="panel" id="panel-story">
+      <div id="storyContent" style="padding:10px 14px 12px;font-size:12px;color:rgba(160,180,220,0.82);line-height:1.72;max-height:280px;overflow-y:auto"></div>
+    </div>
+
+    <div class="panel" id="panel-protect">
+      <div class="protect-list" id="protectList"></div>
+    </div>
+
+    <p id="error"></p>
+
+    <div class="footer">
+      <div class="footer-text">
+        <p class="notice">Observed via Chrome APIs · Classified via Disconnect list · Values never read</p>
+        <p class="credit">Built by Freemware</p>
+      </div>
+      <button class="btn-clear" id="btnClear" style="visibility:hidden">Clear</button>
+    </div>
+
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

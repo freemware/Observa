@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "WebLens",
+  "version": "0.12.3",
+  "description": "See what a website is doing behind the scenes.",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "ui/popup/popup.html",
+    "default_title": "WebLens"
+  },
+  "permissions": [
+    "storage",
+    "webRequest",
+    "webNavigation",
+    "tabs",
+    "cookies",
+    "publicSuffix",
+    "declarativeNetRequest",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "ui/dashboard/dashboard.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}
