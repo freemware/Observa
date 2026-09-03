@@ -4,6 +4,13 @@
   <meta charset="utf-8"/>
   <title>WebLens</title>
   <link rel="stylesheet" href="../theme.css"/>
+  <!-- "Field Report" pairing (v0.13.0) — serif display + sans body. MV3's
+       default extension-page CSP only restricts script-src/object-src, so
+       this stylesheet link isn't CSP-blocked; if the fetch itself fails
+       (offline / no network), every family below falls back to a system
+       serif/sans stack (see ui/theme.css's --font-serif/--font-sans), so the
+       page still looks correct, just with a different serif/sans face. -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Public+Sans:wght@400;500;600;700&display=swap"/>
   <style>
     /* s1/s2/s3 aliases kept so the rest of this stylesheet (written before
        the shared token pass) doesn't need a full find/replace — they just
@@ -20,7 +27,7 @@
     html,body{height:100%;overflow:hidden}
     body{
       background:var(--bg);color:var(--text);
-      font:13px/1.5 system-ui,-apple-system,sans-serif;
+      font:13px/1.5 var(--font-sans);
       display:flex;flex-direction:column;
     }
 
@@ -30,31 +37,38 @@
       height:52px;flex-shrink:0;
       background:var(--s1);
       border-bottom:1px solid var(--border2);
-      box-shadow:0 1px 0 rgba(var(--accent-rgb),.06), 0 2px 8px rgba(var(--accent-rgb),.05);
     }
     .logo{
-      font-size:16px;font-weight:900;letter-spacing:-.04em;flex-shrink:0;
-      background:linear-gradient(135deg,rgb(var(--accent-rgb)) 0%,rgb(var(--social-rgb)) 55%,rgb(var(--fingerprint-rgb)) 100%);
-      -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+      font-family:var(--font-serif);
+      font-size:18px;font-weight:600;letter-spacing:-.01em;flex-shrink:0;
+      color:var(--text);
     }
     /* ── Logo mark ── a lens with a small tracker-graph inside it: what the
-       product does (reveal the hidden network of trackers) drawn literally,
-       same 3-stop gradient as the wordmark so icon and text read as one
-       unit rather than two competing brand elements. */
-    .logo-mark{display:flex;align-items:center;gap:6px;flex-shrink:0}
+       product does (reveal the hidden network of trackers) drawn literally.
+       No wordmark gradient in the Field Report look — the mark carries the
+       brand color, the wordmark itself is plain ink-colored serif type. */
+    .logo-mark{display:flex;align-items:center;gap:7px;flex-shrink:0}
     .logo-icon{flex-shrink:0}
     .divider{width:1px;height:20px;background:var(--border2);flex-shrink:0;margin:0 2px}
-
-    /* Session selector */
-    .session-wrap{position:relative;flex-shrink:0}
-    #sessionSelect{
-      appearance:none;background:var(--s2);border:1px solid var(--border2);
-      border-radius:8px;color:var(--text);font:12px system-ui;
-      padding:5px 26px 5px 10px;cursor:pointer;max-width:210px;
-      transition:border-color .15s,box-shadow .15s;
+    .topbar-kicker{
+      margin-left:auto;flex-shrink:0;font-size:9.5px;font-weight:700;
+      letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+      white-space:nowrap;padding-right:2px;
     }
-    #sessionSelect:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.12)}
-    .sarrow{position:absolute;right:8px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--muted);font-size:9px}
+
+    /* Session selector — underlined text with a small chevron, not a boxed
+       dropdown pill, per the Field Report look. */
+    .session-wrap{position:relative;flex-shrink:0;display:flex;align-items:center}
+    #sessionSelect{
+      appearance:none;background:none;border:none;
+      border-bottom:1px solid var(--border3);border-radius:0;
+      color:var(--text);font:500 12px var(--font-sans);
+      padding:4px 16px 4px 2px;cursor:pointer;max-width:210px;
+      transition:border-color .15s;
+    }
+    #sessionSelect:hover{border-color:var(--accent)}
+    #sessionSelect:focus{outline:none;border-color:var(--accent)}
+    .sarrow{position:absolute;right:2px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--muted);font-size:9px}
 
     /* Search */
     .search-wrap{position:relative;flex-shrink:0}
@@ -108,30 +122,46 @@
     /* ── Layout ─────────────────────────────────────────────────────────── */
     .main{display:flex;flex:1;overflow:hidden;min-height:0}
 
-    /* ── Footer credit — deliberately minimal: one small low-contrast line,
-       out of the flow of everything above it, never overlapping content. ── */
+    /* ── Footer strip — per-category tally (built from real session counts,
+       see buildCategoryTally() in dashboard.js) on the left, the existing
+       low-contrast credit line on the right. ─────────────────────────────── */
     .app-footer{
-      flex-shrink:0;padding:3px 16px;font-size:9.5px;color:var(--muted);
-      opacity:.55;text-align:right;background:var(--s1);border-top:1px solid var(--border);
+      flex-shrink:0;padding:7px 20px;font-size:9.5px;color:var(--muted);
+      display:flex;align-items:center;justify-content:space-between;gap:16px;
+      background:var(--s1);border-top:1px solid var(--border);
       user-select:none;
     }
+    #categoryTally{display:flex;align-items:center;gap:14px;flex-wrap:wrap;min-width:0}
+    .ct-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted2)}
+    .ct-sq{width:7px;height:7px;border-radius:2px;flex-shrink:0}
+    .app-footer-credit{opacity:.65;flex-shrink:0}
 
-    /* ── Hero line — the one-sentence summary, shown before anyone has to
-       click anything ──────────────────────────────────────────────────── */
+    /* ── Hero — a real headline block, not a compact strip: a large serif
+       sentence stating the finding, with the emphasized clause in italic
+       accent color, then a smaller sans sub-sentence with more detail. ── */
     .hero-line{
-      padding:12px 20px 10px;font-size:13px;color:var(--text2);line-height:1.55;
-      border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface1);
-      display:flex;align-items:center;justify-content:space-between;gap:14px;
+      padding:26px 32px 22px;flex-shrink:0;background:var(--surface1);
+      border-bottom:1px solid var(--border);
+      display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
     }
-    .hero-line strong{color:var(--text)}
-    .hero-line-text{flex:1;min-width:0}
+    .hero-line-text{flex:1;min-width:0;max-width:760px}
+    .hero-headline{
+      font-family:var(--font-serif);font-size:26px;line-height:1.32;
+      font-weight:500;color:var(--text);letter-spacing:-.01em;
+    }
+    .hero-headline em{
+      font-style:italic;font-weight:500;color:var(--accent);
+    }
+    .hero-sub{
+      margin-top:9px;font-size:13px;color:var(--text2);line-height:1.55;
+    }
     #btnReplay{
       flex-shrink:0;display:inline-flex;align-items:center;gap:6px;
-      padding:5px 12px;border-radius:var(--radius-md);border:1px solid var(--border2);
-      background:var(--surface2);color:var(--text2);font-size:11px;font-weight:600;
-      cursor:pointer;transition:all .15s;white-space:nowrap;
+      padding:6px 4px;border:none;border-bottom:1px solid var(--border3);
+      background:none;color:var(--text2);font-size:11.5px;font-weight:600;font-family:var(--font-sans);
+      cursor:pointer;transition:all .15s;white-space:nowrap;margin-bottom:3px;
     }
-    #btnReplay:hover{background:var(--surface3);color:var(--text)}
+    #btnReplay:hover{color:var(--accent);border-color:var(--accent)}
     #btnReplay:disabled{opacity:.5;cursor:default}
 
     /* ── Data Journey replay overlay ─────────────────────────────────────── */
@@ -181,7 +211,7 @@
     #cy-wrap.wl-hidden, #table-view.wl-hidden{display:none}
     #cy{
       width:100%;height:100%;
-      background:radial-gradient(ellipse at 50% 40%, var(--surface2) 0%, var(--bg) 65%, var(--surface1) 100%);
+      background:var(--bg);
     }
 
     /* Tooltip */
@@ -202,7 +232,9 @@
     .tt-exposure svg{flex-shrink:0}
 
     /* Legend */
-    .legend{position:absolute;bottom:14px;left:14px;display:flex;flex-wrap:wrap;gap:5px;max-width:360px}
+    .legend-wrap{position:absolute;bottom:14px;left:14px;max-width:400px;display:flex;flex-direction:column;gap:6px}
+    .legend{display:flex;flex-wrap:wrap;gap:5px}
+    .legend-note{font-size:10px;color:var(--muted);letter-spacing:.01em}
     .lpill{
       display:flex;align-items:center;gap:5px;padding:4px 10px 4px 7px;
       border-radius:20px;background:var(--surface1);
@@ -252,14 +284,49 @@
     .tbl-exposure-badge{display:inline-flex;align-items:center;vertical-align:-1.5px;margin-right:5px}
     .tbl-exposure-high{color:rgb(var(--danger-rgb))}
     .tbl-exposure-medium{color:rgb(var(--warning-rgb))}
+    .tbl-tracker-badge{display:inline-flex;align-items:center;vertical-align:-1.5px;margin-right:5px;color:var(--accent)}
 
-    /* ── Detail panel ────────────────────────────────────────────────────── */
+    /* ── Detail panel — "In focus" annotated side panel ─────────────────── */
     .detail{
-      width:350px;flex-shrink:0;background:var(--s1);
+      width:392px;flex-shrink:0;background:var(--s1);
       border-left:1px solid var(--border2);
       display:flex;flex-direction:column;overflow:hidden;
-      box-shadow:-2px 0 12px rgba(var(--accent-rgb),.05);
     }
+    /* "In focus: <domain>" head — italic serif title, two-stat row in serif
+       numerals (requests made / owning org). */
+    .if-title{
+      font-family:var(--font-serif);font-style:italic;font-size:19px;
+      font-weight:500;color:var(--text);line-height:1.3;word-break:break-word;
+    }
+    /* .d-domain (kept as a functional/test hook, see table-grouping-verify.js)
+       carries its own monospace/accent2 styling from elsewhere in this sheet
+       (used when it's NOT inside the new "In focus" title) — override it back
+       to plain serif-inherited styling in this specific context. */
+    .if-title .d-domain{font-style:normal;font-weight:600;color:var(--accent);font-family:inherit;font-size:inherit}
+    .if-stats{display:flex;gap:22px;margin-top:14px}
+    .if-stat-n{font-family:var(--font-serif);font-size:22px;font-weight:600;color:var(--text);line-height:1}
+    .if-stat-l{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:3px}
+    /* Prose body — sentence-style explanation, not a bulleted list. */
+    .if-prose{font-size:12.5px;color:var(--text2);line-height:1.7;padding:16px 18px 4px}
+    .if-prose .if-reveal{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(var(--accent-rgb),.4);cursor:pointer;font-weight:600;background:none;border-top:none;border-left:none;border-right:none;font:inherit;padding:0}
+    .if-prose .if-reveal:hover{border-bottom-color:var(--accent)}
+    .if-prose code{font-family:monospace;font-size:11.5px;background:var(--s2);padding:1px 5px;border-radius:4px}
+    /* Quoted callout — block/breakage caveat text */
+    .if-quote{
+      margin:14px 18px 0;padding:10px 16px;border-left:3px solid var(--border3);
+      font-family:var(--font-serif);font-style:italic;font-size:12.5px;
+      color:var(--text2);line-height:1.6;
+    }
+    .if-actions{padding:16px 18px 18px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+    .if-outline-btn{
+      padding:8px 16px;border-radius:20px;border:1px solid var(--border3);
+      background:none;color:var(--text);font:600 12px var(--font-sans);cursor:pointer;
+      display:inline-flex;align-items:center;gap:7px;transition:all .15s;
+    }
+    .if-outline-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(var(--accent-rgb),.06)}
+    .if-outline-btn.if-blocked{border-color:rgba(var(--success-rgb),.4);color:rgb(var(--success-rgb))}
+    .if-see-all{font-size:11px;color:var(--muted2);text-decoration:none;border-bottom:1px solid var(--border3);cursor:pointer;background:none;border-top:none;border-left:none;border-right:none;font-family:var(--font-sans);padding:0}
+    .if-see-all:hover{color:var(--accent);border-color:var(--accent)}
     .detail-empty{
       flex:1;display:flex;flex-direction:column;
       align-items:center;justify-content:center;
@@ -391,7 +458,7 @@
     .org-color-bar{width:4px;align-self:stretch;flex-shrink:0}
     .org-card-main{flex:1;padding:13px 15px}
     .org-card-top{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
-    .org-name{font-size:14px;font-weight:700;color:var(--text)}
+    .org-name{font-family:var(--font-serif);font-size:16px;font-weight:600;color:var(--text)}
     .org-chips{display:flex;gap:5px;flex-wrap:wrap}
     .org-chip{font-size:10px;padding:2px 8px;border-radius:10px;background:var(--s3);color:var(--muted2);border:1px solid var(--border)}
     .org-chip-warn{background:rgba(var(--warning-rgb),.14);color:rgb(var(--warning-rgb));border-color:rgba(var(--warning-rgb),.3)}
@@ -422,7 +489,7 @@
       padding:32px 36px;box-shadow:0 24px 80px rgba(0,0,0,.35),0 4px 20px rgba(0,0,0,.2);
     }
     .story-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border)}
-    .story-title{font-size:16px;font-weight:700;color:var(--text)}
+    .story-title{font-family:var(--font-serif);font-size:18px;font-weight:600;color:var(--text)}
     .story-close{background:var(--s2);border:1px solid var(--border2);border-radius:7px;color:var(--muted2);cursor:pointer;padding:5px 12px;font-size:11px;font-weight:600;transition:all .15s}
     .story-close:hover{background:var(--s3);color:var(--text)}
     .story-body{font-size:13px;color:var(--text2);line-height:1.78}
@@ -487,11 +554,6 @@
     <span class="logo">WebLens</span>
   </div>
   <div class="divider"></div>
-  <div class="session-wrap">
-    <select id="sessionSelect"><option>Loading…</option></select>
-    <span class="sarrow">▾</span>
-  </div>
-  <div class="divider"></div>
   <div class="search-wrap">
     <span class="sicon">⌕</span>
     <input id="searchInput" type="text" placeholder="Filter domains…" autocomplete="off"/>
@@ -509,6 +571,12 @@
     <button class="vtab active" data-view="graph">Graph</button>
     <button class="vtab" data-view="orgs">Organizations</button>
   </div>
+  <span class="topbar-kicker">A Privacy Field Report</span>
+  <div class="session-wrap">
+    <select id="sessionSelect"><option>Loading…</option></select>
+    <span class="sarrow">▾</span>
+  </div>
+  <div class="divider"></div>
   <button class="topbar-btn" id="btnInsights"></button>
   <button class="topbar-btn" id="btnTheme" title="Theme"></button>
   <button class="topbar-btn" id="btnSettings" title="History &amp; block settings"></button>
@@ -517,7 +585,7 @@
 <div class="main">
   <div id="graph-view">
     <div class="hero-line">
-      <div class="hero-line-text" id="heroLine"><span class="skel" style="width:70%;height:15px;display:inline-block"></span></div>
+      <div class="hero-line-text" id="heroLine"><div class="hero-headline"><span class="skel" style="width:70%;height:26px;display:inline-block"></span></div></div>
       <button id="btnReplay" title="Replay this session's requests in the order they happened"></button>
     </div>
     <div id="graph-area">
@@ -528,7 +596,10 @@
       <div id="cy-wrap">
         <div id="cy"></div>
         <div id="tooltip"></div>
-        <div class="legend" id="legend"></div>
+        <div class="legend-wrap">
+          <div class="legend" id="legend"></div>
+          <div class="legend-note">Solid = matched a known tracker list &nbsp;·&nbsp; faint = unclassified</div>
+        </div>
       </div>
       <div id="table-view">
       <p class="empty-msg" id="tl-loading">Loading…</p>
@@ -565,7 +636,10 @@
   </div>
 </div>
 
-<div class="app-footer">Built by Freemware</div>
+<div class="app-footer">
+  <div id="categoryTally"></div>
+  <div class="app-footer-credit">Built by Freemware</div>
+</div>
 
 <!-- Insights overlay — Story + Findings + Protect, merged into one place -->
 <div id="story-overlay" style="display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);align-items:flex-start;justify-content:center;padding:60px 24px;overflow-y:auto">

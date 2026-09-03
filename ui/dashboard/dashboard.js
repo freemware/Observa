@@ -322,6 +322,17 @@ async function loadAllSessions() {
     const s = await chrome.runtime.sendMessage({ type:'weblens:getSession', tabId });
     if (!s || s.error) continue;
     if (s.pageUrl?.startsWith('chrome')) continue;
+    // Also skip a session still stuck at "about:blank" — the pre-existing,
+    // documented Playwright-only artifact (see CONTEXT.md's "Known testing
+    // limitations"): opening the dashboard/popup itself via page.goto()
+    // commits an about:blank navigation first, which session.js normally
+    // corrects once the real URL lands. A tab that's never had that
+    // correction land isn't a real visited page — most commonly the
+    // dashboard/popup's own tab (whose only "requests" are its own asset
+    // fetches, e.g. the Field Report webfont link, not anything the user
+    // browsed to). Filtering it out here keeps the auto-selected "best"
+    // session below from ever picking that noise over a real session.
+    if (!s.pageUrl || s.pageUrl === 'about:blank') continue;
     out.push({ tabId, session:s });
   }
   return out.sort((a,b) => b.session.startedAt - a.session.startedAt);
@@ -371,63 +382,92 @@ function buildElements(session) {
   return { nodes, edges, domainMap:map };
 }
 
+// Reads a resolved theme color off <html> at call time — Cytoscape's style
+// engine takes literal color strings, not CSS custom properties, so graph
+// colors that need to track the active theme (ink, paper) are read via
+// getComputedStyle rather than duplicated as separate hex constants here.
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+let _lastGraphElements = null;
+
 function initGraph({ nodes, edges }) {
   if (cy) { cy.destroy(); cy = null; }
+  _lastGraphElements = { nodes, edges };
 
-  // Draw glow rings on the canvas behind Cytoscape using an overlay
-  // We paint these after layout settles via a one-time layoutstop handler
+  const ink    = cssVar('--text') || '#2a2621';
+  const paper  = cssVar('--surface1') || '#fffdf9';
+  const accent = cssVar('--accent') || '#a8501f';
+  const textRgb = cssVar('--text-rgb') || '42,38,33';
 
   cy = cytoscape({
     container: document.getElementById('cy'),
     elements: { nodes, edges },
     style: [
-      // ── Base node ──────────────────────────────────────────────────────
+      // ── Base node — thin ring, category-tinted fill at reduced opacity,
+      // label always visible next to the node in the small sans body font
+      // (the same --font-sans pairing the rest of the page uses). ────────
       { selector:'node', style:{
         'background-color':          'data(color)',
-        'background-opacity':        0.92,
+        'background-opacity':        0.22,
         'label':                     'data(label)',
         'width':                     'data(size)',
         'height':                    'data(size)',
-        'font-size':                 '9px',
-        'font-family':               'system-ui,-apple-system,sans-serif',
+        'font-size':                 '10px',
+        'font-family':               'Public Sans,-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif',
         'font-weight':               '600',
-        'color':                     'rgba(17,24,39,0)',
-        'text-opacity':              0,
+        'color':                     ink,
+        'text-opacity':              0.85,
         'text-valign':               'bottom',
         'text-halign':               'center',
         'text-margin-y':             '7px',
         'text-max-width':            '90px',
         'text-wrap':                 'ellipsis',
-        'text-background-color':     '#f0f4ff',
-        'text-background-opacity':   0,
+        'text-background-color':     paper,
+        'text-background-opacity':   0.75,
         'text-background-padding':   '2px',
         'text-background-shape':     'round-rectangle',
-        'border-width':              1.5,
+        'border-width':              1.4,
         'border-color':              'data(color)',
-        'border-opacity':            0.35,
-        'shadow-blur':               12,
-        'shadow-color':              'data(color)',
-        'shadow-opacity':            0.25,
-        'shadow-offset-x':           0,
-        'shadow-offset-y':           0,
-        'transition-property':       'opacity,border-width,border-color,border-opacity,shadow-opacity,text-opacity,background-opacity',
+        'border-opacity':            0.9,
+        'shadow-opacity':            0,
+        'transition-property':       'opacity,border-width,border-color,border-opacity,text-opacity,background-opacity',
         'transition-duration':       '180ms',
       }},
-      // ── Page node (center) ─────────────────────────────────────────────
+      // ── Tracker vs. unclassified — the popup/hero "N trackers" count means
+      // "matched a known tracker list" (provenance === 'Classified'), which
+      // includes every category, not just Advertising/Fingerprinting. Before
+      // this, a classified and an unclassified node looked almost identical
+      // (same low fill opacity, color was the only cue) — no way to tell
+      // which of the N nodes were the counted trackers without opening each
+      // one's detail panel. Classified nodes now render visibly solid;
+      // unclassified nodes stay light/hollow, so the count is legible on
+      // the graph itself. See also the legend note in dashboard.html. ─────
+      { selector:'node[provenance = "Classified"]', style:{
+        'background-opacity': 0.55,
+        'border-width':       1.8,
+      }},
+      { selector:'node[provenance = "Observed"]', style:{
+        'background-opacity': 0.1,
+        'border-opacity':     0.55,
+      }},
+      // ── Page node (center) — plain paper fill with a bold dark ink ring,
+      // not a gradient/glow. ─────────────────────────────────────────────
       { selector:'node[type="page"]', style:{
         'shape':              'round-rectangle',
-        'font-weight':        '800',
+        'background-color':   paper,
+        'background-opacity': 1,
+        'font-weight':        '700',
         'font-size':          '11px',
-        'color':              '#111827',
+        'color':              ink,
         'text-opacity':       1,
         'text-margin-y':      '9px',
-        'text-background-opacity': 0.7,
-        'border-width':       2,
-        'border-color':       C_PAGE,
-        'border-opacity':     0.7,
-        'shadow-color':       C_PAGE,
-        'shadow-opacity':     0.5,
-        'shadow-blur':        20,
+        'text-background-opacity': 0.75,
+        'border-width':       2.5,
+        'border-color':       ink,
+        'border-opacity':     0.85,
+        'shadow-opacity':     0,
       }},
       // ── Data exposure marker ──────────────────────────────────────────
       // A domain whose requests tripped the Data Exposure Detector gets a
@@ -449,49 +489,51 @@ function initGraph({ nodes, edges }) {
       }},
       // ── Selected ───────────────────────────────────────────────────────
       { selector:'node:selected', style:{
-        'border-width':       3,
-        'border-color':       '#ffffff',
-        'border-opacity':     0.8,
-        'shadow-blur':        22,
-        'shadow-opacity':     0.7,
+        'border-width':       2.5,
+        'border-color':       accent,
+        'border-opacity':     1,
+        'shadow-opacity':     0,
         'text-opacity':       1,
-        'color':              'rgba(17,24,39,.95)',
-        'text-background-opacity': 0.75,
-        'background-opacity': 1,
+        'color':              ink,
+        'text-background-opacity': 0.85,
+        'background-opacity': 0.4,
       }},
       // ── Hover highlight ────────────────────────────────────────────────
       { selector:'node.hl', style:{
-        'border-width':       2.5,
-        'border-color':       '#ffffff',
-        'border-opacity':     0.6,
-        'shadow-blur':        18,
-        'shadow-opacity':     0.65,
+        'border-width':       2,
+        'border-color':       accent,
+        'border-opacity':     0.8,
+        'shadow-opacity':     0,
         'text-opacity':       1,
-        'color':              'rgba(17,24,39,.92)',
-        'text-background-opacity': 0.7,
-        'background-opacity': 1,
+        'color':              ink,
+        'text-background-opacity': 0.8,
+        'background-opacity': 0.34,
       }},
       // ── Faded ─────────────────────────────────────────────────────────
       { selector:'node.faded', style:{
-        'opacity':            0.08,
+        'opacity':            0.1,
         'shadow-opacity':     0,
       }},
       // ── Search states ─────────────────────────────────────────────────
       { selector:'node.search-match', style:{
         'border-width':       2.5,
-        'border-color':       '#fcd34d',
+        'border-color':       accent,
         'border-opacity':     1,
-        'shadow-color':       '#fcd34d',
-        'shadow-opacity':     0.55,
+        'shadow-opacity':     0,
         'text-opacity':       1,
-        'color':              '#854d0e',
-        'text-background-opacity': 0.7,
+        'color':              ink,
+        'text-background-opacity': 0.85,
+        'background-opacity': 0.4,
       }},
       { selector:'node.search-dim', style:{ 'opacity':0.1, 'shadow-opacity':0 }},
-      // ── Edges ─────────────────────────────────────────────────────────
+      // ── Edges — thin lines, ink-tinted rather than the old blue. Opacity
+      // bumped from an earlier 0.16 (functionally invisible against the
+      // light theme's warm-paper background — a real bug, not a style
+      // choice: 16% ink on #faf7f2 falls under most displays' visible
+      // threshold at 0.9px width) to a value readable in both themes. ────
       { selector:'edge', style:{
-        'width':              1.2,
-        'line-color':         'rgba(99,120,200,0.14)',
+        'width':              1,
+        'line-color':         `rgba(${textRgb},0.38)`,
         'curve-style':        'bezier',
         'line-style':         'solid',
         'target-arrow-shape': 'none',
@@ -500,9 +542,9 @@ function initGraph({ nodes, edges }) {
       }},
       { selector:'edge.faded', style:{ 'opacity':0.02 }},
       { selector:'edge.hl', style:{
-        'line-color':         'rgba(79,110,247,0.45)',
-        'width':              1.8,
-        'opacity':            1,
+        'line-color':         accent,
+        'width':              1.3,
+        'opacity':            0.7,
       }},
     ],
     layout:{
@@ -510,15 +552,19 @@ function initGraph({ nodes, edges }) {
       animate:         true,
       animationDuration: 1100,
       animationEasing: 'ease-out-cubic',
-      nodeRepulsion:   () => 28000,
-      idealEdgeLength: () => 200,
-      edgeElasticity:  () => 40,
-      gravity:         0.06,
-      numIter:         2000,
+      // Nodes carry an always-visible label now (Field Report redesign —
+      // labels used to only show on hover/select), so they need more room
+      // than the old hover-only layout did to avoid overlapping text.
+      nodeRepulsion:   () => 90000,
+      idealEdgeLength: () => 260,
+      edgeElasticity:  () => 60,
+      gravity:         0.05,
+      numIter:         2500,
       fit:             true,
-      padding:         80,
+      padding:         90,
       randomize:       true,
-      componentSpacing: 80,
+      componentSpacing: 120,
+      nodeOverlap:     40,
     },
     userZoomingEnabled:  true,
     userPanningEnabled:  true,
@@ -574,6 +620,33 @@ function initGraph({ nodes, edges }) {
   });
   cy.on('tap', evt => { if (evt.target === cy) showEmpty(); });
   return cy;
+}
+
+// ── Category tally footer strip (v0.13.0) ─────────────────────────────────
+// A per-category count built from the exact same domainMap grouping the
+// graph/table/legend already use — no separate counting logic invented,
+// just a small tally over the same real data. Unclassified third-party and
+// first-party domains are folded in too, using the same colors the legend
+// already uses for those buckets.
+function buildCategoryTally(domainMap) {
+  const counts = new Map();
+  for (const info of domainMap.values()) {
+    const label = info.category || (info.party === 'first-party' ? 'First party' : 'Unclassified');
+    const color = info.category ? (CAT_CLR[info.category] ?? C_THIRD)
+      : (info.party === 'first-party' ? C_FIRST : C_THIRD);
+    if (!counts.has(label)) counts.set(label, { label, color, count: 0 });
+    counts.get(label).count++;
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count);
+}
+
+function renderCategoryTally(domainMap) {
+  const el = document.getElementById('categoryTally');
+  if (!el) return;
+  const tally = buildCategoryTally(domainMap);
+  el.innerHTML = tally.map(t =>
+    `<span class="ct-item"><span class="ct-sq" style="background:${t.color}"></span>${esc(t.label)} · ${t.count}</span>`
+  ).join('');
 }
 
 // ── Legend ────────────────────────────────────────────────────────────────────
@@ -1225,6 +1298,13 @@ function buildExposureBody(exposures) {
     </div>`;
 }
 
+// Total classified trackers currently in the session — same "trackers" count
+// the hero line and top-bar stat already use (domains with a category),
+// reused here for the "See all N trackers" link rather than recomputed.
+function _sessionTrackerCount() {
+  return [..._currentDomainMap.values()].filter(v => v.category).length;
+}
+
 function renderDetail(d) {
   _detailNodeData = d;
   const { flags, tips, domCookies } = assessFlags(d, sessionCookies);
@@ -1239,6 +1319,68 @@ function renderDetail(d) {
   // Static explanation — provenance: Explained
   const resourceTypes = [...new Set((d.requests??[]).map(r=>r.type))];
   const explanationText = getExplanation(d.category, d.organization, d.party, resourceTypes);
+
+  // ── "In focus" head — italic serif title, a two-stat row in serif
+  // numerals (requests made / owning org), then sentence-style prose
+  // combining the classification explanation with the first exposure
+  // finding (if any), inline, via the SAME redacted/reveal markup and
+  // delegated-listener mechanism the full "Data leaving the page" accordion
+  // below uses (exposureRowHtml + the #detail click listener's
+  // .exp-reveal-btn branch) — not a re-implementation.
+  const reqCount = d.requests?.length ?? 0;
+  const ownerLabel = d.organization || (d.party === 'first-party' ? 'This site' : 'Unclassified');
+  const firstExposure = exposures.find(e => e.type !== 'page');
+  const moreExposures = exposures.filter(e => e.type !== 'page').length - (firstExposure ? 1 : 0);
+
+  const proseHtml = `
+    <div class="if-prose">
+      <p style="margin:0 0 10px">${esc(explanationText)}</p>
+      ${firstExposure ? `
+      <p style="margin:0">
+        Its requests appear to include a <strong>${esc(firstExposure.label.toLowerCase())}</strong> —
+        <span class="exp-value" data-redacted="${esc(firstExposure.redacted)}" data-raw="${esc(firstExposure.raw ?? firstExposure.redacted)}">${esc(firstExposure.redacted)}</span>.
+        ${firstExposure.raw && firstExposure.raw !== firstExposure.redacted ? `<button type="button" class="exp-reveal-btn if-reveal">Reveal the value →</button>` : ''}
+        ${moreExposures > 0 ? ` (${moreExposures} more finding${moreExposures===1?'':'s'} below.)` : ''}
+      </p>` : ''}
+    </div>`;
+
+  // ── Verify & Protect — a quoted callout for the block/breakage caveat,
+  // an outlined block/unblock button (still the real .verify-action-btn,
+  // still dispatched through the #detail delegated listener below), and a
+  // "See all N trackers" link into the Organizations view.
+  let verifyHtml = '';
+  if (d.party === 'third-party') {
+    const realDomains = d.etld1s ?? [d.etld1 ?? d.domain];
+    const blockedCount = realDomains.filter(dom => blockedForSite.has(dom)).length;
+    const allBlocked = blockedCount > 0 && blockedCount === realDomains.length;
+    const btnAction = allBlocked ? 'unblock' : 'block';
+    const btnLabel = allBlocked
+      ? `${icon('undo',{size:13})} Unblock &amp; reload`
+      : `${icon('shield',{size:13})} Block this tracker`;
+    const trackerTotal = _sessionTrackerCount();
+    verifyHtml = `
+      <div class="if-quote">Blocking ${realDomains.length>1?'these domains':'this domain'} only affects this site — WebLens then reloads the page and shows a before/after receipt. That is a count of what changed, not a promise the site still works.</div>
+      <div class="if-actions">
+        <button class="verify-action-btn if-outline-btn${allBlocked?' if-blocked':''}" data-action="${btnAction}">${btnLabel}</button>
+        <button type="button" class="if-see-all" id="btnSeeAllTrackers">See all ${trackerTotal} tracker${trackerTotal===1?'':'s'} →</button>
+      </div>`;
+  }
+
+  const headHtml = `
+    <div class="detail-head">
+      <div class="if-title">In focus: <b class="d-domain">${esc(d.domain)}</b></div>
+      ${d.organization ? `<div class="d-org" style="margin-top:2px">${esc(d.organization)}</div>` : ''}
+      ${(d.etld1s?.length ?? 1) > 1
+        ? `<div class="d-org" style="opacity:.7">Includes ${d.etld1s.length} domains: ${d.etld1s.map(esc).join(', ')}</div>`
+        : ''}
+      <div class="d-badges" style="margin-top:9px">${badge}</div>
+      <div class="if-stats">
+        <div><div class="if-stat-n">${reqCount}</div><div class="if-stat-l">Requests made</div></div>
+        <div><div class="if-stat-n" style="font-size:15px">${esc(ownerLabel)}</div><div class="if-stat-l">Owning org</div></div>
+      </div>
+    </div>
+    ${proseHtml}
+    ${verifyHtml}`;
 
   // Flags section
   const flagsBody = `
@@ -1329,24 +1471,11 @@ function renderDetail(d) {
     </div>`;
 
   document.getElementById('detail').innerHTML = `
-    <div class="detail-head">
-      <div class="d-domain">${esc(d.domain)}</div>
-      ${d.organization?`<div class="d-org">${esc(d.organization)}</div>`:''}
-      ${(d.etld1s?.length ?? 1) > 1
-        ? `<div class="d-org" style="opacity:.7">Includes ${d.etld1s.length} domains: ${d.etld1s.map(esc).join(', ')}</div>`
-        : ''}
-      <div class="d-badges">${badge}</div>
-    </div>
+    ${headHtml}
     <div class="detail-scroll">
-      ${makeSection('explain','What is this?', null, `
-        <div class="explain-card">
-          ${esc(explanationText)}
-          <div style="margin-top:7px;font-size:9px;opacity:0.45;font-style:italic">Provenance: Explained — authored description of this service category.</div>
-        </div>`, true)}
-      ${makeSection('flags','Flags', flags.length||null, flagsBody, true)}
-      ${d.party === 'third-party' ? makeSection('verify','Verify &amp; Protect', null, buildVerifySection(d), true) : ''}
+      ${makeSection('flags','Flags', flags.length||null, flagsBody, false)}
       ${makeSection('cookies','Cookies', domCookies.length, cookiesBody, domCookies.length>0)}
-      ${exposures.length ? makeSection('exposure','Data leaving the page', exposures.length, buildExposureBody(exposures), true) : ''}
+      ${exposures.length ? makeSection('exposure','Data leaving the page', exposures.length, buildExposureBody(exposures), false) : ''}
       ${makeSection('requests','Requests', d.requests?.length, reqsBody, false)}
       <div class="prov-note" style="margin-top:8px">
         <strong>Provenance: ${esc(d.provenance??'Observed')}</strong><br>
@@ -1355,6 +1484,11 @@ function renderDetail(d) {
           : 'Reported directly by Chrome\'s network API.'}
       </div>
     </div>`;
+
+  // "See all N trackers" — a plain, properly-attached listener (not
+  // delegated, since it's simplest to bind fresh right after this exact
+  // element is created, same pattern already used for #btnVerifyUndo below).
+  document.getElementById('btnSeeAllTrackers')?.addEventListener('click', () => switchView('orgs'));
 }
 
 // ── Verify & Protect (M6) ────────────────────────────────────────────────────
@@ -1362,44 +1496,10 @@ function renderDetail(d) {
 // explicit click — never automatic, never based on classification alone.
 // Blocking is scoped to (site, domain) via background/blocking.js and is a
 // toggle: there is no separate "restore" flow, unblocking IS the undo.
-
-function buildVerifySection(d) {
-  const realDomains = d.etld1s ?? [d.etld1 ?? d.domain];
-  const blockedCount = realDomains.filter(dom => blockedForSite.has(dom)).length;
-  const allBlocked = blockedCount > 0 && blockedCount === realDomains.length;
-  const someBlocked = blockedCount > 0 && !allBlocked;
-
-  const statusLine = allBlocked
-    ? `<div style="color:rgb(var(--success-rgb));font-size:12px;margin-bottom:8px;display:flex;align-items:center;gap:6px">${icon('shield-check',{size:14})} Blocked on this site${realDomains.length>1?` (all ${realDomains.length} domains)`:''}</div>`
-    : someBlocked
-      ? `<div style="color:rgb(var(--warning-rgb));font-size:12px;margin-bottom:8px;display:flex;align-items:center;gap:6px">${icon('ban',{size:14})} Partially blocked (${blockedCount} of ${realDomains.length} domains)</div>`
-      : '';
-
-  const btnAction = allBlocked ? 'unblock' : 'block';
-  const btnLabel  = allBlocked
-    ? `${icon('undo',{size:13})} Unblock &amp; reload to verify`
-    : `${icon('shield',{size:13})} Block on this site &amp; verify`;
-
-  // Not-yet-blocked is an available action, not a warning — kept neutral
-  // rather than solid red (which reads as "something's wrong"). Once
-  // blocked, it reflects that protection is active (green), matching the
-  // same treatment used in the popup's Block/Unblock control.
-  const btnStyle = allBlocked
-    ? 'background:rgba(var(--success-rgb),.12);color:rgb(var(--success-rgb));border:1px solid rgba(var(--success-rgb),.35)'
-    : 'background:transparent;color:var(--text2);border:1px solid var(--border2)';
-
-  return `
-    <div class="explain-card">
-      <div style="font-size:12px;color:var(--muted2);margin-bottom:10px;line-height:1.5">
-        Block ${realDomains.length>1?'these domains':'this domain'} only on this site, then WebLens reloads the page and shows a before/after receipt — not a promise the site still works.
-      </div>
-      ${statusLine}
-      <button class="verify-action-btn" data-action="${btnAction}" style="padding:8px 14px;border-radius:8px;font-size:12px;cursor:pointer;font-weight:600;display:inline-flex;align-items:center;gap:7px;${btnStyle}">
-        ${btnLabel}
-      </button>
-      <div style="margin-top:8px;font-size:9px;opacity:.5;font-style:italic">Scoped to this site only — ${esc(d.domain)} is never blocked on other sites you visit.</div>
-    </div>`;
-}
+// (The block/unblock control itself — status line, outlined button, caveat
+// quote — is now built directly in renderDetail()'s "In focus" head, as
+// part of the v0.13.0 Field Report redesign, instead of its own accordion
+// section here; the workflow functions below are unchanged.)
 
 function showVerifyOverlay(d, title, bodyHtml) {
   const overlay  = document.getElementById('verify-overlay');
@@ -1652,8 +1752,17 @@ function renderTable(session, domainMap) {
     const exposureBadge = exposures.length
       ? `<span class="tbl-exposure-badge tbl-exposure-${hasPersonalExposure ? 'high' : 'medium'}" title="Data exposure: ${esc([...new Set(exposures.map(e => e.type).filter(t => t !== 'page'))].map(t => EXPOSURE_TYPE_LABEL[t] ?? t).join(', '))}">${icon(hasPersonalExposure ? 'alert-triangle' : 'search', { size:11 })}</span>`
       : '';
+    // Explicit tracker marker — the "N trackers" count means "matched a
+    // known tracker list" (provenance === 'Classified'), which spans every
+    // category, not just Advertising/Fingerprinting. The category badge
+    // alone implied this (a dash meant unclassified) but never said so —
+    // this makes the same fact readable directly, matching the graph's new
+    // solid/faint node treatment.
+    const trackerBadge = r.provenance === 'Classified'
+      ? `<span class="tbl-tracker-badge" title="Matched a known tracker list">${icon('shield', { size:11 })}</span>`
+      : '';
     return `<tr>
-        <td>${exposureBadge}${esc(r.domain)}</td>
+        <td>${exposureBadge}${trackerBadge}${esc(r.domain)}</td>
         <td class="nm">${esc(r.organization??'—')}</td>
         <td class="nm">${r.category
           ?`<span class="badge badge-${esc(r.category)}" style="font-size:10px;padding:2px 8px">${esc(r.category)}</span>`
@@ -1773,6 +1882,7 @@ async function loadSession(session) {
   _lastSession = session; renderTimeline(session);
   renderTable(session, domainMap);
   renderOrgGroups(domainMap, sessionCookies);
+  renderCategoryTally(domainMap);
   renderHeroLine(session, domainMap);
   updateInsightsBadge(domainMap, sessionCookies);
   renderTrend(session); // prepends the "what changed" diff + history into orgs-view
@@ -1781,7 +1891,15 @@ async function loadSession(session) {
   applySearch(document.getElementById('searchInput').value);
 }
 
-// ── Hero line — one sentence, shown before anyone clicks anything ────────────
+// ── Hero — a real headline block (v0.13.0 Field Report redesign), not a
+// compact one-line strip: a large serif sentence stating the finding, with
+// the emphasized clause in italic accent color, then a smaller sub-sentence
+// with more detail. Every number here comes from the same domainMap the
+// graph/table/stats strip already build — nothing hardcoded. The timing
+// clause is only shown when buildJourney() (built from real request
+// timestamps, same function the Data Journey replay uses) actually has a
+// third-party arrival to report; it's omitted rather than guessed when a
+// session has no third-party requests yet. ─────────────────────────────────
 function renderHeroLine(session, domainMap) {
   const el = document.getElementById('heroLine');
   if (!el) return;
@@ -1790,14 +1908,36 @@ function renderHeroLine(session, domainMap) {
   const trackers = domains.filter(d => d.category);
   const pageHost = hostOf(session.pageUrl);
   if (!session.requests?.length) {
-    el.innerHTML = `No requests captured yet for <strong>${esc(pageHost)}</strong>. Reload the page with WebLens active.`;
+    el.innerHTML = `<div class="hero-headline">No requests captured yet for <em>${esc(pageHost)}</em>.</div>
+      <div class="hero-sub">Reload the page with WebLens active, then reopen the dashboard.</div>`;
     return;
   }
-  let text = `<strong>${esc(pageHost)}</strong> contacted <strong>${domains.length} domain${domains.length===1?'':'s'}</strong>`;
-  if (thirdParty.length) text += `, <strong>${thirdParty.length}</strong> third-party`;
-  if (trackers.length) text += ` — <strong>${trackers.length}</strong> ${trackers.length===1?'is a':'are'} classified tracker${trackers.length===1?'':'s'}`;
-  text += '.';
-  el.innerHTML = text;
+
+  const companyCount = thirdParty.length;
+  const trackerCount = trackers.length;
+
+  let headline;
+  if (companyCount === 0) {
+    headline = `Everything <strong>${esc(pageHost)}</strong> loaded came from <em>${esc(pageHost)} itself</em> — no third-party companies were introduced.`;
+  } else if (trackerCount > 0) {
+    headline = `This page quietly introduced you to <em>${companyCount} compan${companyCount===1?'y':'ies'}</em> — <em>${trackerCount}</em> of them tracker${trackerCount===1?'':'s'}.`;
+  } else {
+    headline = `This page quietly introduced you to <em>${companyCount} compan${companyCount===1?'y':'ies'}</em> — none matched a known tracker list.`;
+  }
+
+  const journey = buildJourney(session, domainMap);
+  const timingClause = journey && journey.steps.length && journey.totalDurationMs > 0
+    ? ` The first of them was contacted within ${journey.totalDurationMs < 1000 ? Math.round(journey.totalDurationMs) + 'ms' : (journey.totalDurationMs/1000).toFixed(1) + 's'} of the page opening.`
+    : '';
+  // Keeps the plain "N domains, M third-party" phrasing in the sub-sentence
+  // (in addition to the italic headline above) — this is also the exact
+  // substring several existing e2e suites poll for as their "third-party
+  // capture has landed" readiness signal, so preserving the literal wording
+  // keeps those tests fast/deterministic rather than falling back to their
+  // retry loop every run.
+  const subText = `${domains.length} domain${domains.length===1?'':'s'} contacted, ${companyCount} third-party.${timingClause}`;
+
+  el.innerHTML = `<div class="hero-headline">${headline}</div><div class="hero-sub">${esc(subText)}</div>`;
 }
 
 // ── Data Journey — replay this session's requests in the order they
@@ -2179,6 +2319,12 @@ async function renderSettingsPanel() {
     await setTheme(btn.dataset.themeValue);
     updateThemeButtonIcon();
     renderSettingsPanel();
+    // Cytoscape reads theme colors as literal strings at init time (see
+    // initGraph's cssVar() comment) — without rebuilding here, switching
+    // theme from this settings panel left the graph's node/edge colors
+    // stuck on whichever theme was active on last render (the small topbar
+    // toggle already did this; this second theme-change entry point didn't).
+    if (_lastGraphElements) initGraph(_lastGraphElements);
   });
 
   document.getElementById('chkHistory').addEventListener('change', async e => {
@@ -2242,6 +2388,12 @@ function updateThemeButtonIcon() {
 document.getElementById('btnTheme')?.addEventListener('click', async () => {
   await cycleTheme();
   updateThemeButtonIcon();
+  // Cytoscape reads theme colors as literal strings at init time (see
+  // cssVar() above), so they don't track a live CSS variable change the way
+  // the rest of the page does — rebuild the graph with the same elements
+  // so node/edge colors pick up the new theme immediately, not on next
+  // session switch.
+  if (_lastGraphElements) initGraph(_lastGraphElements);
 });
 
 document.getElementById('btnSettings')?.addEventListener('click', () => {

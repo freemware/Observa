@@ -1,25 +1,49 @@
 /* WebLens shared design tokens — used by both popup and dashboard so they
-   read as one product instead of two. Default theme is dark; a real toggle
-   (persisted via settings.js's `theme` field) can flip to light by setting
-   data-theme="light" on <html> — see ui/theme.js. */
+   read as one product instead of two.
+
+   v0.13.0 "Field Report" redesign: the light theme is now a warm,
+   editorial, data-journalism look (warm paper background, terracotta
+   accent, serif+sans pairing) instead of the old blue/white theme. Dark
+   theme got its own "night edition" counterpart in the same warm family
+   rather than being left on the old blue-on-navy palette, so a user with
+   dark mode selected still gets a coherent result. Structural role names
+   (bg, surface1-3, text/text2, border/border2/border3, accent/accent2,
+   shadow/shadow2) are unchanged — only their values moved — so no other
+   file needed to change just to pick up the new look. Default (no explicit
+   choice, no media match) stays the dark/night-edition palette, matching
+   the pre-existing default. */
 
 :root {
   /* ── Structural chrome — flips between themes ─────────────────────────── */
-  --bg:       #090c14;
-  --surface1: #10141f;   /* topbar, cards, popup body panels */
-  --surface2: #141a29;   /* secondary fill, hover rows */
-  --surface3: #1a2032;   /* tertiary fill, badge backgrounds */
-  --border:   rgba(255,255,255,.07);
-  --border2:  rgba(255,255,255,.13);
-  --border3:  rgba(255,255,255,.22);
-  --text:     #e8ecf6;
-  --text2:    #b6c0d6;
-  --muted:    rgba(232,236,246,.42);
-  --muted2:   rgba(232,236,246,.62);
-  --accent:   #5b7cfa;
-  --accent2:  #8298ff;
+  --bg:       #17181b;
+  --surface1: #1d1e22;   /* topbar, cards, popup body panels */
+  --surface2: #24252a;   /* secondary fill, hover rows */
+  --surface3: #2c2d33;   /* tertiary fill, badge backgrounds */
+  --border:   rgba(237,238,242,.08);
+  --border2:  rgba(237,238,242,.14);
+  --border3:  rgba(237,238,242,.24);
+  --text:     #ececee;
+  --text2:    #b7b7bd;
+  --muted:    rgba(236,236,238,.42);
+  --muted2:   rgba(236,236,238,.62);
+  --accent:   #d97a4a;
+  --accent2:  #e89568;
+  --text-rgb: 236,236,238;
   --shadow:   0 1px 4px rgba(0,0,0,.35), 0 4px 20px rgba(0,0,0,.28);
   --shadow2:  0 2px 14px rgba(0,0,0,.4), 0 10px 36px rgba(0,0,0,.32);
+
+  /* ── Typography — "Field Report" pairing: a serif display face for
+     headlines/emphasis (Google Fonts "Newsreader") and a clean sans body
+     face ("Public Sans"). MV3's default extension-page CSP only restricts
+     script-src/object-src, not style-src or font-src, so the Google Fonts
+     <link rel="stylesheet"> in dashboard.html/popup.html is not blocked by
+     CSP — but it still requires network access at page-load time, which a
+     packed/offline install may not have. Every family below carries a full
+     system fallback stack, so if the webfont request fails (offline,
+     blocked, slow), the browser silently falls back to a native serif/sans
+     face instead of breaking the layout — no JS feature-detection needed. */
+  --font-serif: 'Newsreader', Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+  --font-sans:  'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 
   /* ── Radii / spacing — one scale for both surfaces ─────────────────────── */
   --radius-sm: 6px;
@@ -29,8 +53,11 @@
 
   /* ── Semantic / category colors — same hue in both themes; only the
      surface they sit on changes, so a single set works everywhere. Used as
-     RGB triples so callers can pick their own alpha: rgba(var(--danger-rgb),.15) */
-  --accent-rgb:      91,124,250;   /* brand blue */
+     RGB triples so callers pick their own alpha: rgba(var(--danger-rgb),.15)
+     Deliberately UNCHANGED by the Field Report pass — these are the graph
+     node / badge category colors the redesign was explicitly asked to
+     reuse as-is, not replace with new hex values. ────────────────────── */
+  --accent-rgb:      217,122,74;   /* brand accent — terracotta (was blue) */
   --danger-rgb:      248,113,113;  /* blocked / high severity / cryptomining */
   --danger-strong-rgb: 239,68,68;  /* solid danger fills (e.g. destructive button) */
   --warning-rgb:     251,146,60;   /* advertising / medium severity / caveats */
@@ -46,57 +73,63 @@
 /* System preference drives it when the user hasn't chosen explicitly */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --bg:       #f0f4ff;
-    --surface1: #ffffff;
-    --surface2: #f7f9ff;
-    --surface3: #eef2fd;
-    --border:   rgba(99,120,200,.10);
-    --border2:  rgba(99,120,200,.20);
-    --border3:  rgba(99,120,200,.32);
-    --text:     #111827;
-    --text2:    #374151;
-    --muted:    rgba(55,65,81,.45);
-    --muted2:   rgba(55,65,81,.65);
-    --accent:   #4f6ef7;
-    --accent2:  #3b55e6;
-    --shadow:   0 1px 4px rgba(79,110,247,.07), 0 4px 20px rgba(79,110,247,.06);
-    --shadow2:  0 2px 12px rgba(79,110,247,.10), 0 8px 32px rgba(79,110,247,.08);
+    --bg:       #faf7f2;
+    --surface1: #fffdf9;
+    --surface2: #f4efe6;
+    --surface3: #ece4d6;
+    --border:   rgba(42,38,33,.09);
+    --border2:  rgba(42,38,33,.15);
+    --border3:  rgba(42,38,33,.26);
+    --text:     #2a2621;
+    --text2:    #55504a;
+    --muted:    rgba(42,38,33,.45);
+    --muted2:   rgba(42,38,33,.66);
+    --accent:   #a8501f;
+    --accent2:  #8a3f17;
+    --accent-rgb: 168,80,31;
+    --text-rgb: 42,38,33;
+    --shadow:   0 1px 4px rgba(42,38,33,.06), 0 4px 20px rgba(42,38,33,.05);
+    --shadow2:  0 2px 12px rgba(42,38,33,.08), 0 8px 32px rgba(42,38,33,.07);
   }
 }
 
 /* Explicit user choice always wins over system preference */
 :root[data-theme="light"] {
-  --bg:       #f0f4ff;
-  --surface1: #ffffff;
-  --surface2: #f7f9ff;
-  --surface3: #eef2fd;
-  --border:   rgba(99,120,200,.10);
-  --border2:  rgba(99,120,200,.20);
-  --border3:  rgba(99,120,200,.32);
-  --text:     #111827;
-  --text2:    #374151;
-  --muted:    rgba(55,65,81,.45);
-  --muted2:   rgba(55,65,81,.65);
-  --accent:   #4f6ef7;
-  --accent2:  #3b55e6;
-  --shadow:   0 1px 4px rgba(79,110,247,.07), 0 4px 20px rgba(79,110,247,.06);
-  --shadow2:  0 2px 12px rgba(79,110,247,.10), 0 8px 32px rgba(79,110,247,.08);
+  --bg:       #faf7f2;
+  --surface1: #fffdf9;
+  --surface2: #f4efe6;
+  --surface3: #ece4d6;
+  --border:   rgba(42,38,33,.09);
+  --border2:  rgba(42,38,33,.15);
+  --border3:  rgba(42,38,33,.26);
+  --text:     #2a2621;
+  --text2:    #55504a;
+  --muted:    rgba(42,38,33,.45);
+  --muted2:   rgba(42,38,33,.66);
+  --accent:   #a8501f;
+  --accent2:  #8a3f17;
+  --accent-rgb: 168,80,31;
+  --text-rgb: 42,38,33;
+  --shadow:   0 1px 4px rgba(42,38,33,.06), 0 4px 20px rgba(42,38,33,.05);
+  --shadow2:  0 2px 12px rgba(42,38,33,.08), 0 8px 32px rgba(42,38,33,.07);
 }
 
 :root[data-theme="dark"] {
-  --bg:       #090c14;
-  --surface1: #10141f;
-  --surface2: #141a29;
-  --surface3: #1a2032;
-  --border:   rgba(255,255,255,.07);
-  --border2:  rgba(255,255,255,.13);
-  --border3:  rgba(255,255,255,.22);
-  --text:     #e8ecf6;
-  --text2:    #b6c0d6;
-  --muted:    rgba(232,236,246,.42);
-  --muted2:   rgba(232,236,246,.62);
-  --accent:   #5b7cfa;
-  --accent2:  #8298ff;
+  --bg:       #17181b;
+  --surface1: #1d1e22;
+  --surface2: #24252a;
+  --surface3: #2c2d33;
+  --border:   rgba(237,238,242,.08);
+  --border2:  rgba(237,238,242,.14);
+  --border3:  rgba(237,238,242,.24);
+  --text:     #ececee;
+  --text2:    #b7b7bd;
+  --muted:    rgba(236,236,238,.42);
+  --muted2:   rgba(236,236,238,.62);
+  --accent:   #d97a4a;
+  --accent2:  #e89568;
+  --accent-rgb: 217,122,74;
+  --text-rgb: 236,236,238;
   --shadow:   0 1px 4px rgba(0,0,0,.35), 0 4px 20px rgba(0,0,0,.28);
   --shadow2:  0 2px 14px rgba(0,0,0,.4), 0 10px 36px rgba(0,0,0,.32);
 }
