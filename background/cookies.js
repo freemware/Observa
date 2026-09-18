@@ -1,4 +1,4 @@
-// WebLens cookie reader — background/cookies.js — M3, extended v0.12.0.
+// Observa cookie reader — background/cookies.js — M3, extended v0.12.0.
 //
 // Reads cookie METADATA for the active tab's URL using chrome.cookies.getAll().
 //
@@ -48,7 +48,7 @@ export async function getCookiesForUrl(url) {
   try {
     rawCookies = await chrome.cookies.getAll({ url });
   } catch (err) {
-    console.error('[WebLens] cookies.getAll failed:', err.message);
+    console.error('[Observa] cookies.getAll failed:', err.message);
     return [];
   }
 

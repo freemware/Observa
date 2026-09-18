@@ -1,4 +1,4 @@
-// WebLens settings store — background/settings.js — M5.
+// Observa settings store — background/settings.js — M5.
 //
 // Single small object in chrome.storage.local holding opt-in, off-by-default
 // feature flags. Kept separate from history.js so it can depend on this
@@ -8,7 +8,7 @@
 // only, never the source of truth — it's always safe to fall back to a
 // fresh storage read if the service worker restarted and the cache is gone.
 
-const SETTINGS_KEY = 'weblens:settings';
+const SETTINGS_KEY = 'observa:settings';
 // theme: 'system' (follow OS) | 'light' | 'dark'. Purely cosmetic, stored
 // alongside historyEnabled since it's the same "small local preference
 // object" — no new storage area, no new permission.
@@ -18,7 +18,7 @@ const SETTINGS_KEY = 'weblens:settings';
 // on-by-default in v0.11.2 per explicit user direction, so the lists stay
 // current without requiring a trip to settings. Still a single toggle the
 // user can turn off at any time, and still the only outbound request
-// WebLens itself ever makes (two fixed public URLs, no browsing data).
+// Observa itself ever makes (two fixed public URLs, no browsing data).
 const DEFAULTS = Object.freeze({ historyEnabled: false, theme: 'system', listRefreshEnabled: true });
 const BOOLEAN_KEYS = new Set(['historyEnabled', 'listRefreshEnabled']);
 

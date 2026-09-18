@@ -1,10 +1,10 @@
-// WebLens Data Exposure Detector — classify/exposure.js (v0.11.0)
+// Observa Data Exposure Detector — classify/exposure.js (v0.11.0)
 //
 // Parses each request's URL query string and (when present) its POST body
 // for locally-recognizable patterns of information leaving the page —
 // emails, phone-shaped strings, coordinates, ZIP codes, and known
 // tracking/campaign identifier parameter names. Everything here runs
-// entirely inside the extension, synchronously, on data WebLens already
+// entirely inside the extension, synchronously, on data Observa already
 // observes via the existing `webRequest` permission (adding the
 // `requestBody` extra-info option to the existing listener does not
 // require a new manifest permission).
@@ -12,7 +12,7 @@
 // Provenance: OBSERVED — a match means this literal string was seen in an
 // outgoing request. It is not proof the value is real, accurate, or tied
 // to the visiting user (a page can send junk, defaults, or someone else's
-// data), and WebLens has no way to confirm that — see the caveat surfaced
+// data), and Observa has no way to confirm that — see the caveat surfaced
 // in the UI.
 //
 // Each finding carries both `redacted` (what's shown by default) and `raw`
@@ -24,7 +24,7 @@
 // the full request/cookie payload, and it never appears in a console.log or
 // error report (CLAUDE.md Rule 2 — "never write cookie values or full URLs
 // with query strings to logs" — applies to logs, not to a value the user
-// explicitly asks WebLens to display).
+// explicitly asks Observa to display).
 //
 // v0.12.0 also added detectValueExposure() below, which runs these same
 // detectors against a single name/value pair — used by cookies.js to check

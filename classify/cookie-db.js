@@ -1,4 +1,4 @@
-// WebLens cookie database — classify/cookie-db.js
+// Observa cookie database — classify/cookie-db.js
 // Source: Open Cookie Database (CC0 1.0 Public Domain)
 // https://github.com/jkwakman/Open-Cookie-Database
 // Entries: 1991 exact + 260 wildcard
@@ -14,8 +14,8 @@ let _live = null;
 
 export async function loadLiveCookieDbOverlay() {
   try {
-    const stored = await chrome.storage.local.get('weblens:liveCookieDb');
-    _live = stored['weblens:liveCookieDb'] ?? null;
+    const stored = await chrome.storage.local.get('observa:liveCookieDb');
+    _live = stored['observa:liveCookieDb'] ?? null;
   } catch { _live = null; }
 }
 

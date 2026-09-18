@@ -1,4 +1,4 @@
-// WebLens dashboard — M4 + Story Mode + M5
+// Observa dashboard — M4 + Story Mode + M5
 // Fixes: removed live Anthropic API call, removed composite risk scores.
 // Added: story mode toggle (Step 1) — plain-English page load narrative.
 // M5: org-grouped bubble map, session history, opt-in settings panel.
@@ -7,6 +7,14 @@
 
 import { getEtld1 } from '../../classify/classify.js';
 import { isBlockedError } from '../../shared/schema.js';
+import { buildEvidenceLink, splitForHighlight } from '../../policy/locate.js';
+import { computeVerdict, TRACKING_CATEGORIES, mostSignificantCategory } from '../../shared/verdict.js';
+import { buildDataInventory } from '../../shared/data-inventory.js';
+import { buildOverviewConcerns } from '../../shared/overview-concerns.js';
+import { buildReport } from '../../shared/report.js';
+import { renderReportHtml } from '../../shared/report-html.js';
+import { orgConcentration, summarizeSessionSignals } from '../../shared/session-signals.js';
+import { computeSettlePoint, classifyTiming, formatElapsed, LATER_CAVEAT } from '../../shared/timing.js';
 import { icon, CATEGORY_ICON_NAME } from '../icons.js';
 import { applyStoredTheme, cycleTheme, setTheme } from '../theme.js';
 
@@ -74,7 +82,7 @@ function getExplanation(category, organization, party, resourceTypes) {
     if (resourceTypes.includes('media')) return 'This domain serves audio or video content. The media server can log your IP address and the content you played.';
     if (resourceTypes.includes('stylesheet')) return 'This domain delivers CSS stylesheets. Style resources are not typically used for tracking but the server can log your visit.';
     if (resourceTypes.includes('script')) return 'This is an unclassified third-party script. Scripts run with full access to the page and can read content, keystrokes, and behaviour — but this domain was not matched in the tracker list.';
-    if (resourceTypes.includes('xmlhttprequest')) return 'This domain receives data sent in the background by the page. The content of these requests is not visible to WebLens.';
+    if (resourceTypes.includes('xmlhttprequest')) return 'This domain receives data sent in the background by the page. The content of these requests is not visible to Observa.';
     if (resourceTypes.includes('image')) return 'This domain serves images, which may include invisible tracking pixels used to confirm the page was loaded.';
   }
   return PARTY_EXPLANATIONS[party] ?? PARTY_EXPLANATIONS.unknown;
@@ -216,7 +224,7 @@ function buildStory(session, cookies) {
     const joined = catParts.length === 1
       ? catParts[0]
       : catParts.slice(0,-1).join(', ') + ' and ' + catParts[catParts.length-1];
-    sentences.push(`Among those third parties, WebLens identified ${joined}.`);
+    sentences.push(`Among those third parties, Observa identified ${joined}.`);
   }
 
   // Advertising callout
@@ -266,12 +274,18 @@ function buildStory(session, cookies) {
 let cy = null, sessionCookies = [], allSessions = [], _currentDomainMap = new Map();
 let storyVisible = false;
 // M5 — opt-in settings (history only; the cross-site heuristic was removed).
-let weblensSettings = { historyEnabled: false, listRefreshEnabled: true }; // placeholder until the real chrome.storage-backed settings load (see line ~2173); mirrors settings.js's DEFAULTS
+let observaSettings = { historyEnabled: false, listRefreshEnabled: true }; // placeholder until the real chrome.storage-backed settings load (see line ~2173); mirrors settings.js's DEFAULTS
 // M6 — Verify & Protect: real domains currently blocked on the loaded
 // session's site, and that site's eTLD+1.
 let blockedForSite = new Set();
 let _currentSiteEtld1 = null;
 let _detailNodeData = null;
+// Policy Intelligence — cached result for whichever tab's session is loaded.
+// Populated from chrome.storage.session (via background/policy-intel.js) on
+// every loadSession() call (cheap — no network), and by the analyze/
+// re-analyze/manual-paste actions below (which do trigger a fetch).
+let _policyIntel = null;
+let _policyAnalyzing = false;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const hostOf = url => { try { return new URL(url).hostname; } catch { return url||'unknown'; } };
@@ -289,7 +303,14 @@ function buildDomainMap(session) {
   const map = new Map();
   for (const req of session.requests) {
     const reqEtld1 = req.etld1 || req.domain;
-    const groupKey = req.organization ? `org:${req.organization}` : `dom:${reqEtld1}`;
+    // Keyed by PARTY as well as owner. youtube.com is Google-owned, and so are
+    // gstatic/ytimg/ggpht; grouping on the organisation alone put the site the
+    // user is actually on inside a third-party company group. The site you are
+    // visiting is never another company, whoever owns it.
+    const partyKey = req.party === 'third-party' ? 'third' : 'first';
+    const groupKey = req.organization
+      ? `${partyKey}:org:${req.organization}`
+      : `${partyKey}:dom:${reqEtld1}`;
 
     if (!map.has(groupKey)) {
       map.set(groupKey, {
@@ -299,6 +320,7 @@ function buildDomainMap(session) {
         rawDomain: req.domain,
         requests: [],
         party: req.party,
+        categories: new Set(),
         category: req.category,
         organization: req.organization,
         provenance: req.provenance,
@@ -306,20 +328,214 @@ function buildDomainMap(session) {
     }
     const entry = map.get(groupKey);
     entry.etld1s.add(reqEtld1);
-    // Update category/org if this request has more info
-    if (!entry.category && req.category) { entry.category = req.category; entry.organization = req.organization; }
+    if (req.category) entry.categories.add(req.category);
+    if (!entry.organization && req.organization) entry.organization = req.organization;
     entry.requests.push(req);
+  }
+  // Describe each group by its most consequential category, not by whichever
+  // request happened to arrive first — see mostSignificantCategory().
+  for (const entry of map.values()) {
+    entry.category = mostSignificantCategory([...entry.categories]) ?? entry.category ?? null;
   }
   return map;
 }
 
+
+// ── Report (v0.27.0) ─────────────────────────────────────────────────────────
+//
+// One document, four destinations. The preview iframe, the .html download, the
+// printed PDF and anything the user copies to share are all the SAME string
+// produced by renderReportHtml() — not four renderers that happen to agree.
+// That is what makes "downloads and shared reports match the preview" a
+// property of the code rather than a promise.
+//
+// The redaction toggle therefore cannot be applied to one surface and missed on
+// another: it is an input to the single build, and every output is regenerated
+// from it.
+let _reportRedact = false;   // off by default, as specified
+let _reportHtml = '';        // the exact bytes currently previewed
+
+function currentReportHtml() {
+  const session = _currentSession;
+  if (!session) return '';
+  const domainMap = _currentDomainMap ?? buildDomainMap(session);
+  const domains = [...domainMap.values()];
+  const policy = _policyIntel ?? null;
+  const policyDocsRead = (policy?.documents ?? []).filter(d => d.ok !== false).length;
+  const { personalTypes, trackingIds } = ov_exposureSummary(domainMap, sessionCookies);
+  const byCategory = {};
+  for (const d of domains) if (d.category) byCategory[d.category] = (byCategory[d.category] ?? 0) + 1;
+
+  const t0 = session.requests?.length ? Math.min(...session.requests.map(r => r.timestamp)) : null;
+  const settleMs = computeSettlePoint((session.requests ?? []).map(r => r.timestamp));
+
+  return renderReportHtml(buildReport({
+    session,
+    cookies: sessionCookies,
+    domains,
+    policy,
+    redact: _reportRedact,
+    version: chrome.runtime.getManifest?.().version ?? null,
+    verdict: computeVerdict({
+      thirdPartyCount: domains.filter(d => d.party === 'third-party').length,
+      byCategory,
+      personalDataTypes: personalTypes,
+      trackingIdCount: trackingIds,
+      policyTensions: (policy?.comparisons ?? []).filter(c => c.status === 'tension').length,
+      policyDocsRead,
+      requestCount: session.requests?.length ?? 0,
+    }),
+    inventory: buildDataInventory({
+      domains: domains.map(d => ({
+        domain: d.domain, organization: d.organization, category: d.category,
+        exposures: combinedExposuresForEntry(d, sessionCookies), requestCount: d.requests.length,
+      })),
+      policyFindings: policy?.findings ?? [],
+      policyDocsRead, t0, settleMs,
+    }),
+    findings: buildSessionFindings(domainMap, sessionCookies) ?? [],
+  }));
+}
+
+function reportFileName() {
+  const host = (() => { try { return new URL(_currentSession?.pageUrl).hostname; } catch { return 'scan'; } })();
+  const date = new Date().toISOString().slice(0, 10);
+  return `observa-report-${host}-${date}${_reportRedact ? '-redacted' : ''}.html`;
+}
+
+function rptStatus(msg) {
+  const el = document.getElementById('rpt-status');
+  if (el) el.textContent = msg ?? '';
+}
+
+function refreshReportPreview() {
+  _reportHtml = currentReportHtml();
+  const frame = document.getElementById('rptFrame');
+  // srcdoc keeps the report entirely in-page: no blob URL to leak, nothing
+  // fetched, and the document stays identical to what gets downloaded.
+  if (frame) frame.srcdoc = _reportHtml;
+  const note = document.getElementById('rpt-redact-note');
+  if (note) {
+    note.textContent = _reportRedact
+      ? 'Values, identifiers and sensitive URL parameters are hidden. Findings are unchanged.'
+      : 'This report may contain personal information, identifiers and URL parameters.';
+  }
+  const sub = document.getElementById('rpt-sub');
+  if (sub) {
+    const host = (() => { try { return new URL(_currentSession?.pageUrl).hostname; } catch { return '—'; } })();
+    sub.textContent = `${host} · ${_currentSession?.requests?.length ?? 0} requests · what you see here is exactly what downloads and shares contain`;
+  }
+}
+
+function openReport() {
+  if (!_currentSession) return;
+  document.getElementById('rptRedact').checked = _reportRedact;
+  refreshReportPreview();
+  rptStatus('');
+  document.getElementById('report-overlay').style.display = 'flex';
+}
+function closeReport() {
+  document.getElementById('report-overlay').style.display = 'none';
+  // Drop the rendered copy rather than leaving an unredacted report in memory.
+  document.getElementById('rptFrame').srcdoc = '';
+  _reportHtml = '';
+}
+
+function downloadHtml() {
+  const blob = new Blob([_reportHtml], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = reportFileName();
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  rptStatus(`Saved ${reportFileName()}${_reportRedact ? '' : ' — this file is not redacted.'}`);
+}
+
+function printReport() {
+  // Prints the preview iframe itself, so the PDF is the previewed document and
+  // not a re-render that could drift from it. The report's own @media print
+  // rules handle pagination.
+  const frame = document.getElementById('rptFrame');
+  try {
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+    rptStatus('Choose "Save as PDF" in the print dialog.');
+  } catch (err) {
+    rptStatus('Could not open the print dialog. Download the HTML and print it from your browser instead.');
+  }
+}
+
+// ── Share ────────────────────────────────────────────────────────────────────
+// Observa has no backend and never uploads scan data, so sharing means putting
+// the report where the user can send it themselves: the clipboard, or a file.
+// Nothing is copied or written until the confirmation below is accepted, and an
+// unredacted report says plainly what it may contain first.
+function openShare() {
+  const body = document.getElementById('share-body');
+  document.getElementById('share-title').textContent = _reportRedact
+    ? 'Share this redacted report'
+    : 'Share this report';
+  body.innerHTML = _reportRedact
+    ? `<p>Observa never uploads anything. Sharing copies the report to your clipboard, or saves it as a file you can send yourself.</p>
+       <p>This report is <strong>redacted</strong>: observed values, identifiers and sensitive URL parameters are hidden. The findings themselves are included.</p>`
+    : `<p>Observa never uploads anything. Sharing copies the report to your clipboard, or saves it as a file you can send yourself.</p>
+       <div class="share-warn"><strong>This report is not redacted.</strong> It may contain personal information, tracking identifiers, and URL parameters observed during the scan — including values that belong to you. Turn on <em>Redact sensitive information</em> first if you are sending this to anyone else.</div>`;
+  document.getElementById('share-overlay').style.display = 'flex';
+}
+function closeShare() { document.getElementById('share-overlay').style.display = 'none'; }
+
+async function shareCopy() {
+  try {
+    await navigator.clipboard.writeText(_reportHtml);
+    closeShare();
+    rptStatus(`Report copied to the clipboard${_reportRedact ? ' (redacted).' : ' — it is not redacted.'}`);
+  } catch {
+    rptStatus('Could not write to the clipboard. Use Download HTML instead.');
+    closeShare();
+  }
+}
+function shareSave() { closeShare(); downloadHtml(); }
+
+document.getElementById('overview-inner')?.addEventListener('click', e => {
+  if (e.target.closest('#btnPreviewReport')) openReport();
+});
+document.getElementById('orgs-panel')?.addEventListener('click', e => {
+  if (!e.target.closest('#orgsShowAll')) return;
+  _orgsTrackersOnly = false;
+  if (_currentDomainMap) renderOrgGroups(_currentDomainMap, sessionCookies);
+});
+document.getElementById('btnReportClose')?.addEventListener('click', closeReport);
+document.getElementById('report-overlay')?.addEventListener('click', e => {
+  if (e.target.id === 'report-overlay') closeReport();
+});
+document.getElementById('rptRedact')?.addEventListener('change', e => {
+  _reportRedact = !!e.target.checked;
+  refreshReportPreview();          // preview updates immediately
+  rptStatus(_reportRedact ? 'Redaction on. Downloads and shares match this preview.'
+                          : 'Redaction off. Downloads and shares match this preview.');
+});
+document.getElementById('btnReportHtml')?.addEventListener('click', downloadHtml);
+document.getElementById('btnReportPdf')?.addEventListener('click', printReport);
+document.getElementById('btnReportShare')?.addEventListener('click', openShare);
+document.getElementById('btnShareCancel')?.addEventListener('click', closeShare);
+document.getElementById('btnShareCopy')?.addEventListener('click', shareCopy);
+document.getElementById('btnShareSave')?.addEventListener('click', shareSave);
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (document.getElementById('share-overlay')?.style.display === 'flex') { closeShare(); return; }
+  if (document.getElementById('report-overlay')?.style.display === 'flex') closeReport();
+});
+
 // ── Sessions ──────────────────────────────────────────────────────────────────
 async function loadAllSessions() {
-  const tabIds = await chrome.runtime.sendMessage({ type:'weblens:getSessions' });
+  const tabIds = await chrome.runtime.sendMessage({ type:'observa:getSessions' });
   if (!tabIds?.length) return [];
   const out = [];
   for (const tabId of tabIds) {
-    const s = await chrome.runtime.sendMessage({ type:'weblens:getSession', tabId });
+    const s = await chrome.runtime.sendMessage({ type:'observa:getSession', tabId });
     if (!s || s.error) continue;
     if (s.pageUrl?.startsWith('chrome')) continue;
     // Also skip a session still stuck at "about:blank" — the pre-existing,
@@ -391,20 +607,49 @@ function cssVar(name) {
 }
 
 let _lastGraphElements = null;
+// Whether the map has been laid out while actually visible — see switchView().
+let _graphSizedOnce = false;
+// Handle on the running cose layout, so it can be stopped before destroy().
+let _graphLayout = null;
 
-function initGraph({ nodes, edges }) {
-  if (cy) { cy.destroy(); cy = null; }
-  _lastGraphElements = { nodes, edges };
+// Layout options live outside the cytoscape() config so the layout can be run
+// explicitly and, crucially, STOPPED before the core is destroyed. An inline
+// `layout:` option is run internally with no handle to reach it, and a cose
+// animation still ticking when destroy() lands hits a torn-down core — which
+// surfaces as "Cannot read properties of null (reading 'notify')". That became
+// reproducible once Overview became the landing view, because toggling the
+// theme rebuilds a graph that is still mid-layout behind a hidden view.
+const GRAPH_LAYOUT = {
+  name:            'cose',
+  animate:         true,
+  animationDuration: 1100,
+  animationEasing: 'ease-out-cubic',
+  // Nodes carry an always-visible label (labels used to show on hover only),
+  // so they need more room than the old layout did to avoid overlapping text.
+  nodeRepulsion:   () => 90000,
+  idealEdgeLength: () => 260,
+  edgeElasticity:  () => 60,
+  gravity:         0.05,
+  numIter:         2500,
+  fit:             true,
+  padding:         90,
+  randomize:       true,
+  componentSpacing: 120,
+  nodeOverlap:     40,
+};
 
-  const ink    = cssVar('--text') || '#2a2621';
-  const paper  = cssVar('--surface1') || '#fffdf9';
-  const accent = cssVar('--accent') || '#a8501f';
-  const textRgb = cssVar('--text-rgb') || '42,38,33';
-
-  cy = cytoscape({
-    container: document.getElementById('cy'),
-    elements: { nodes, edges },
-    style: [
+// Rebuildable graph style. Cytoscape takes literal colour strings, not CSS
+// custom properties, so theme values are read via cssVar() at BUILD time —
+// which means a theme change needs the style rebuilt. Doing that in place
+// (cy.style(...)) rather than tearing the core down avoids two problems: a
+// destroyed-core crash from the cose animation still ticking, and the graph
+// re-randomising its layout on every theme toggle.
+function graphStyle() {
+  const ink    = cssVar('--text') || '#e6edf8';
+  const paper  = cssVar('--surface1') || '#111722';
+  const accent = cssVar('--accent') || '#3d9bff';
+  const textRgb = cssVar('--text-rgb') || '230,237,248';
+  return [
       // ── Base node — thin ring, category-tinted fill at reduced opacity,
       // label always visible next to the node in the small sans body font
       // (the same --font-sans pairing the rest of the page uses). ────────
@@ -546,32 +791,27 @@ function initGraph({ nodes, edges }) {
         'width':              1.3,
         'opacity':            0.7,
       }},
-    ],
-    layout:{
-      name:            'cose',
-      animate:         true,
-      animationDuration: 1100,
-      animationEasing: 'ease-out-cubic',
-      // Nodes carry an always-visible label now (Field Report redesign —
-      // labels used to only show on hover/select), so they need more room
-      // than the old hover-only layout did to avoid overlapping text.
-      nodeRepulsion:   () => 90000,
-      idealEdgeLength: () => 260,
-      edgeElasticity:  () => 60,
-      gravity:         0.05,
-      numIter:         2500,
-      fit:             true,
-      padding:         90,
-      randomize:       true,
-      componentSpacing: 120,
-      nodeOverlap:     40,
-    },
+    ];
+}
+
+function initGraph({ nodes, edges }) {
+  if (_graphLayout) { try { _graphLayout.stop(); } catch {} _graphLayout = null; }
+  if (cy) { try { cy.destroy(); } catch {} cy = null; }
+  _lastGraphElements = { nodes, edges };
+
+  cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements: { nodes, edges },
+    style: graphStyle(),
     userZoomingEnabled:  true,
     userPanningEnabled:  true,
     boxSelectionEnabled: false,
     minZoom: 0.15,
     maxZoom: 5,
   });
+
+  _graphLayout = cy.layout(GRAPH_LAYOUT);
+  _graphLayout.run();
 
   const tooltip = document.getElementById('tooltip');
 
@@ -742,6 +982,11 @@ function makeSection(id, title, countBadge, bodyHtml, openByDefault=true) {
 
 // ── Detail: empty state ───────────────────────────────────────────────────────
 function showEmpty() {
+  // Collapsed rather than filled with a placeholder. A 392px column explaining
+  // that it is empty took a third of the Map for no information; the graph and
+  // the table both read better with the room back. The affordance moved to the
+  // legend note, which is already where the map explains itself.
+  document.getElementById('detail')?.classList.add('is-empty');
   document.getElementById('detail').innerHTML = `
     <div class="detail-empty">
       <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
@@ -820,17 +1065,25 @@ const FINDING_CATEGORIES = new Set(['Fingerprinting', 'Cryptomining']);
 // group's requests, deduplicated by (type, paramName) — a tracking ID sent
 // on every request of a session should show up once, not fifty times.
 function collectExposures(requests) {
-  const seen = new Set();
-  const out = [];
+  const byKey = new Map();
   for (const r of requests) {
+    const ts = typeof r.timestamp === 'number' ? r.timestamp : null;
     for (const e of r.exposures ?? []) {
       const key = `${e.type}:${e.paramName}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(e);
+      if (!byKey.has(key)) {
+        byKey.set(key, { ...e, firstTs: ts, lastTs: ts });
+        continue;
+      }
+      // Same match seen again — widen the window rather than dropping it, so
+      // "this also happened after the page settled" survives deduplication.
+      const cur = byKey.get(key);
+      if (ts != null) {
+        cur.firstTs = cur.firstTs == null ? ts : Math.min(cur.firstTs, ts);
+        cur.lastTs  = cur.lastTs  == null ? ts : Math.max(cur.lastTs, ts);
+      }
     }
   }
-  return out;
+  return [...byKey.values()];
 }
 
 // Which of the session's cookies belong to a given domain-map entry — the
@@ -872,7 +1125,9 @@ function buildSessionExposures(domainMap, cookies) {
   const rows = [];
   for (const [, info] of domainMap) {
     const exp = combinedExposuresForEntry(info, cookies);
-    if (exp.length) rows.push({ domain: info.domain, exposures: exp });
+    // `party` is carried on the row because domainMap is keyed by eTLD+1, not
+    // by domain — looking the entry back up by row.domain silently misses.
+    if (exp.length) rows.push({ domain: info.domain, party: info.party, exposures: exp });
   }
   return rows;
 }
@@ -903,6 +1158,7 @@ function buildSessionFindings(domainMap, cookies) {
         : `Tracking identifiers detected leaving the page`,
       detail: `${distinctTypes.map(t => EXPOSURE_TYPE_LABEL[t] ?? t).join(', ')} found in requests to ${domainCount} domain${domainCount===1?'':'s'}. Values are redacted — see each domain's detail panel for specifics. This reflects what was observed in the request itself, not confirmation it is accurate or belongs to you.`,
       provenance: 'Observed',
+      evidenceView: 'data',
     });
   }
 
@@ -918,6 +1174,7 @@ function buildSessionFindings(domainMap, cookies) {
           ? `Operated by ${info.organization}. Fingerprinting can identify you across sites even after clearing cookies.`
           : 'Can identify you across sites even after clearing cookies and private browsing.',
         provenance: 'Classified',
+        evidenceView: 'graph', evidenceDomain: info.domain,
       });
     }
     if (info.category === 'Cryptomining') {
@@ -927,6 +1184,7 @@ function buildSessionFindings(domainMap, cookies) {
         title: `Cryptocurrency miner: ${info.domain}`,
         detail: 'This script uses your CPU to mine cryptocurrency without your explicit consent.',
         provenance: 'Classified',
+        evidenceView: 'graph', evidenceDomain: info.domain,
       });
     }
   }
@@ -940,6 +1198,7 @@ function buildSessionFindings(domainMap, cookies) {
       title: `${crossSiteLongLived.length} long-lived cross-site cookie${crossSiteLongLived.length > 1 ? 's' : ''}`,
       detail: 'These cookies persist for over 90 days and can be sent on requests to other sites, enabling cross-site tracking.',
       provenance: 'Inferred',
+      evidenceView: 'orgs',
     });
   }
 
@@ -969,12 +1228,35 @@ function buildSessionFindings(domainMap, cookies) {
     });
   }
 
+  // One company, several domains. A page contacting three Google-owned domains
+  // reads as three strangers in a domain list; saying so plainly is the whole
+  // point of resolving ownership. Low severity — this is orientation, not an
+  // accusation, and a CDN plus an analytics endpoint is ordinary.
+  // domainMap groups by owning company, so each entry is already one company —
+  // its `etld1s` holds the real domains behind it. Flatten back to one row per
+  // domain, which is what orgConcentration expects; passing the grouped entries
+  // straight in made every company look like a single domain and the finding
+  // could never fire.
+  const domainRows = [...domainMap.values()].flatMap(d =>
+    [...(d.etld1s ?? new Set([d.etld1]))].map(e => ({
+      party: d.party, organization: d.organization, etld1: e, domain: e,
+    })));
+  for (const { organization, domains } of orgConcentration(domainRows)) {
+    findings.push({
+      icon: icon('users',{size:16}),
+      severity: 'low',
+      title: `${domains.length} of these domains belong to ${organization}`,
+      detail: `${domains.join(', ')} are all operated by ${organization}, so what looks like several separate companies in the domain list is one.`,
+      provenance: 'Classified',
+    });
+  }
+
   if (!findings.length) {
     findings.push({
       icon: icon('check-circle',{size:16}),
       severity: 'none',
-      title: 'No notable findings for this session',
-      detail: 'No fingerprinters, cryptominers, or unusually risky cookies were detected. This does not mean no tracking is occurring.',
+      title: 'Nothing flagged in network activity or cookies',
+      detail: 'No fingerprinters, cryptominers, or unusually risky cookies were detected in the requests Observa saw. This covers network activity only — it says nothing about what the site’s own policy claims, and it does not mean no tracking is occurring.',
       provenance: 'Observed',
     });
   }
@@ -1036,7 +1318,7 @@ function buildProtectPanel(domainMap, cookies) {
   tools.push({
     icon: '🧱',
     title: 'uBlock Origin',
-    desc: 'The most effective free ad and tracker blocker. Blocks the majority of what WebLens detected on this page before it even loads.',
+    desc: 'The most effective free ad and tracker blocker. Blocks the majority of what Observa detected on this page before it even loads.',
     link: 'https://ublockorigin.com',
     linkLabel: 'Get uBlock Origin →',
     relevant: hasAds || hasFP || hasCM,
@@ -1119,7 +1401,7 @@ function buildProtectPanel(domainMap, cookies) {
         <div class="protect-section-icon">🧰</div>
         <div>
           <div class="protect-section-title">Recommended tools for this page</div>
-          <div class="protect-section-sub">Based on what WebLens detected during your session</div>
+          <div class="protect-section-sub">Based on what Observa detected during your session</div>
         </div>
       </div>
       <div class="protect-tips-list">${relevantTools.map(makeTip).join('')}</div>
@@ -1135,8 +1417,8 @@ function buildProtectPanel(domainMap, cookies) {
       <div class="protect-tips-list">${relevantHabits.map(makeTip).join('')}</div>
     </div>
     <div style="padding:12px 16px;font-size:10px;color:var(--muted);line-height:1.65;border-radius:10px;background:var(--s2);border:1px solid var(--border)">
-      <strong style="color:var(--muted2)">Provenance: Explained</strong> — these recommendations are based on what WebLens classified during your session. 
-      WebLens does not earn money from any tool or service listed here. No affiliate links.
+      <strong style="color:var(--muted2)">Provenance: Explained</strong> — these recommendations are based on what Observa classified during your session. 
+      Observa does not earn money from any tool or service listed here. No affiliate links.
     </div>`;
 }
 
@@ -1179,17 +1461,33 @@ function buildOrgGroups(domainMap, cookies) {
   });
 }
 
+// Set when the reader arrives from the "Trackers matched" tile, so the screen
+// shows the rows that tile counted rather than everything.
+let _orgsTrackersOnly = false;
+
 function renderOrgGroups(domainMap, cookies) {
-  const groups = buildOrgGroups(domainMap, cookies);
+  const all = buildOrgGroups(domainMap, cookies);
+  const groups = _orgsTrackersOnly ? all.filter(g => TRACKING_CATEGORIES.has(g.category)) : all;
   const panel  = document.getElementById('orgs-panel');
   if (!panel) return;
 
+  // A filter the reader did not set must announce itself, with a way out.
+  const filterBar = _orgsTrackersOnly
+    ? `<div class="orgs-filter">Showing ${groups.length} of ${all.length} companies \u2014 only those matching a known tracker list.
+         <button type="button" class="ov-link" id="orgsShowAll">Show all companies \u2192</button></div>`
+    : '';
+
   if (!groups.length) {
-    panel.innerHTML = '<p style="color:var(--muted);padding:24px;text-align:center;font-size:13px">No third-party services detected for this session.</p>';
+    panel.innerHTML = filterBar + (_orgsTrackersOnly
+      ? '<p class="ov-empty" style="padding:28px 24px;text-align:center">None of the companies this page contacted matched a known tracker list.</p>'
+      : '');
+    if (!_orgsTrackersOnly) {
+    panel.innerHTML = '<p class="ov-empty" style="padding:28px 24px;text-align:center">This page kept to itself \u2014 every request went to the site\'s own domain.<br/>When a page does contact other companies, they are grouped here by who owns them.</p>';
+    }
     return;
   }
 
-  panel.innerHTML = groups.map((g, gi) => {
+  panel.innerHTML = filterBar + groups.map((g, gi) => {
     const orgIcon = CAT_ICON[g.category] ?? '';
     const catBadge = g.category
       ? `<span class="badge badge-${esc(g.category)}" style="font-size:10px">${orgIcon} ${esc(g.category)}</span>`
@@ -1306,6 +1604,7 @@ function _sessionTrackerCount() {
 }
 
 function renderDetail(d) {
+  document.getElementById('detail')?.classList.remove('is-empty');
   _detailNodeData = d;
   const { flags, tips, domCookies } = assessFlags(d, sessionCookies);
 
@@ -1359,7 +1658,7 @@ function renderDetail(d) {
       : `${icon('shield',{size:13})} Block this tracker`;
     const trackerTotal = _sessionTrackerCount();
     verifyHtml = `
-      <div class="if-quote">Blocking ${realDomains.length>1?'these domains':'this domain'} only affects this site — WebLens then reloads the page and shows a before/after receipt. That is a count of what changed, not a promise the site still works.</div>
+      <div class="if-quote">Blocking ${realDomains.length>1?'these domains':'this domain'} only affects this site — Observa then reloads the page and shows a before/after receipt. That is a count of what changed, not a promise the site still works.</div>
       <div class="if-actions">
         <button class="verify-action-btn if-outline-btn${allBlocked?' if-blocked':''}" data-action="${btnAction}">${btnLabel}</button>
         <button type="button" class="if-see-all" id="btnSeeAllTrackers">See all ${trackerTotal} tracker${trackerTotal===1?'':'s'} →</button>
@@ -1492,7 +1791,7 @@ function renderDetail(d) {
 }
 
 // ── Verify & Protect (M6) ────────────────────────────────────────────────────
-// WebLens's first active intervention. Every action here is triggered by an
+// Observa's first active intervention. Every action here is triggered by an
 // explicit click — never automatic, never based on classification alone.
 // Blocking is scoped to (site, domain) via background/blocking.js and is a
 // toggle: there is no separate "restore" flow, unblocking IS the undo.
@@ -1545,7 +1844,7 @@ async function _waitAndSnapshot(tabId, realDomains) {
   const start = Date.now();
 
   while (Date.now() - start < MAX_WAIT_MS) {
-    try { session = await chrome.runtime.sendMessage({ type: 'weblens:getSession', tabId }); }
+    try { session = await chrome.runtime.sendMessage({ type: 'observa:getSession', tabId }); }
     catch { session = null; }
     const count = session?.requests?.length ?? 0;
     if (count === lastCount && count > 0) {
@@ -1562,7 +1861,7 @@ async function _waitAndSnapshot(tabId, realDomains) {
 
   let cookies = [];
   try {
-    const cr = await chrome.runtime.sendMessage({ type: 'weblens:getCookies', url: session.pageUrl });
+    const cr = await chrome.runtime.sendMessage({ type: 'observa:getCookies', url: session.pageUrl });
     cookies = cr?.cookies ?? [];
   } catch { /* best effort */ }
 
@@ -1582,7 +1881,7 @@ async function runVerifyWorkflow(d, action) {
   try {
     for (const dom of realDomains) {
       await chrome.runtime.sendMessage({
-        type: action === 'block' ? 'weblens:blockDomain' : 'weblens:unblockDomain',
+        type: action === 'block' ? 'observa:blockDomain' : 'observa:unblockDomain',
         siteEtld1: _currentSiteEtld1, domain: dom,
       });
     }
@@ -1602,7 +1901,7 @@ async function runVerifyWorkflow(d, action) {
   } catch {
     showVerifyOverlay(d, action === 'block' ? 'blocked' : 'unblocked', `
       <div style="padding:16px;color:var(--muted2);font-size:13px">
-        ${action === 'block' ? 'Blocked' : 'Unblocked'} on this site, but WebLens couldn't reload the tab automatically (it may have closed). Reload the page yourself to see the effect.
+        ${action === 'block' ? 'Blocked' : 'Unblocked'} on this site, but Observa couldn't reload the tab automatically (it may have closed). Reload the page yourself to see the effect.
       </div>`);
     return;
   }
@@ -1614,7 +1913,7 @@ async function runVerifyWorkflow(d, action) {
 function renderVerifyReceipt(d, action, before, after) {
   if (!after) {
     showVerifyOverlay(d, 'incomplete', `<div style="padding:20px;color:var(--muted2);font-size:13px">
-      The page reloaded, but WebLens couldn't capture new data in time (the tab may have closed or navigated away). Try again from the dashboard.
+      The page reloaded, but Observa couldn't capture new data in time (the tab may have closed or navigated away). Try again from the dashboard.
     </div>`);
     return;
   }
@@ -1630,7 +1929,7 @@ function renderVerifyReceipt(d, action, before, after) {
     </div>`;
   };
 
-  // Breakage caveat — a soft, honestly-limited signal only. WebLens has no
+  // Breakage caveat — a soft, honestly-limited signal only. Observa has no
   // way to see whether a page visually or functionally broke; the closest
   // thing it CAN observe is whether first-party (same-site) requests
   // completed less often or errored more after the block.
@@ -1643,7 +1942,7 @@ function renderVerifyReceipt(d, action, before, after) {
     <div style="margin-top:14px;padding:12px 16px;border-radius:10px;background:rgba(var(--warning-rgb),.12);border:1px solid rgba(var(--warning-rgb),.35)">
       <strong style="color:rgb(var(--warning-rgb));font-size:12px;display:flex;align-items:center;gap:6px">${icon('alert-triangle',{size:14})} Worth checking the page</strong>
       <div style="font-size:11px;color:var(--muted2);margin-top:4px;line-height:1.5">
-        First-party requests that completed ${fpDropped > 0 ? `dropped by ${fpDropped}` : ''}${fpDropped>0 && fpErrorsUp ? ' and ' : ''}${fpErrorsUp ? 'errors increased' : ''} after blocking. That can mean the site needed this resource — or it can be unrelated. <strong>WebLens cannot see whether the page looks or works correctly.</strong> Only looking at it can confirm that.
+        First-party requests that completed ${fpDropped > 0 ? `dropped by ${fpDropped}` : ''}${fpDropped>0 && fpErrorsUp ? ' and ' : ''}${fpErrorsUp ? 'errors increased' : ''} after blocking. That can mean the site needed this resource — or it can be unrelated. <strong>Observa cannot see whether the page looks or works correctly.</strong> Only looking at it can confirm that.
       </div>
     </div>` : `
     <div style="margin-top:14px;padding:12px 16px;border-radius:10px;background:var(--s2);border:1px solid var(--border)">
@@ -1731,7 +2030,7 @@ function renderTable(session, domainMap) {
   const loading = document.getElementById('tl-loading');
   const table   = document.getElementById('req-table');
   if (!entries.length) {
-    if (loading) { loading.textContent = 'No requests captured. Reload the page with WebLens active.'; loading.style.display = ''; }
+    if (loading) { loading.textContent = 'No requests captured. Reload the page with Observa active.'; loading.style.display = ''; }
     if (table) table.style.display = 'none';
     return;
   }
@@ -1855,14 +2154,17 @@ let _currentSession = null;
 
 async function loadSession(session) {
   _currentSession = session;
+  const status = document.getElementById('captureStatus');
+  if (status) status.textContent = `${session.requests?.length ?? 0} requests captured · ${session.startedAt ? new Date(session.startedAt).toLocaleString() : 'Current session'}`;
   hideInsights();
 
   sessionCookies = [];
   try {
-    const cr = await chrome.runtime.sendMessage({ type:'weblens:getCookies', url:session.pageUrl });
+    const cr = await chrome.runtime.sendMessage({ type:'observa:getCookies', url:session.pageUrl });
     sessionCookies = cr?.cookies ?? [];
   } catch {}
 
+  _graphSizedOnce = false;
   const { nodes, edges, domainMap } = buildElements(session);
   _currentDomainMap = domainMap;
 
@@ -1872,7 +2174,7 @@ async function loadSession(session) {
   blockedForSite = new Set();
   try {
     _currentSiteEtld1 = getEtld1(new URL(session.pageUrl).hostname);
-    const res = await chrome.runtime.sendMessage({ type: 'weblens:getBlockedForSite', siteEtld1: _currentSiteEtld1 });
+    const res = await chrome.runtime.sendMessage({ type: 'observa:getBlockedForSite', siteEtld1: _currentSiteEtld1 });
     blockedForSite = new Set(res?.domains ?? []);
   } catch { /* no page URL yet, or message failed */ }
 
@@ -1884,8 +2186,41 @@ async function loadSession(session) {
   renderOrgGroups(domainMap, sessionCookies);
   renderCategoryTally(domainMap);
   renderHeroLine(session, domainMap);
+  autoGraphMode(domainMap.size);
+  renderOverview();
+  _dcSelected = null;
+  renderDataCollected();
   updateInsightsBadge(domainMap, sessionCookies);
   renderTrend(session); // prepends the "what changed" diff + history into orgs-view
+
+  // Policy Intelligence — pull whatever's already cached for this tab (no
+  // network call, chrome.storage.session read only). If the user already had
+  // this dashboard open and analyzed this site, switching sessions/reloading
+  // shows it immediately; otherwise this stays null until the Policy tab is
+  // opened (ensurePolicyAnalysis, called from switchView) or the user pastes
+  // something manually.
+  _policyIntel = null;
+  try {
+    _policyIntel = await chrome.runtime.sendMessage({ type: 'observa:getPolicyIntel', tabId: session.tabId });
+  } catch { /* service worker restarted mid-call — next open will retry */ }
+  if (document.getElementById('policy-view')?.classList.contains('active')) renderPolicyView();
+
+  // Analyze the policy without waiting to be asked.
+  //
+  // This used to fire only when the Policy tab was clicked, which meant the
+  // Overview's "Policy concerns" tile read "—" and Top concerns had only half
+  // its inputs until the user happened to visit another screen. The Overview
+  // promises "what its own policy says about it" — it cannot keep that promise
+  // from a cache nobody filled. Deliberately not awaited: the rest of the
+  // dashboard renders immediately and the policy-dependent parts re-render
+  // when it lands.
+  //
+  // Egress note (CLAUDE.md Rule 2/4): this does not widen what is fetched —
+  // same page HTML, same at-most-three same-site documents, same
+  // credentials:'omit'. It moves the trigger from "opened the Policy tab" to
+  // "opened the dashboard", both proximate user actions. Results are cached
+  // per tab, so this is one analysis per page, not one per dashboard open.
+  autoAnalyzePolicy();
 
   showEmpty();
   applySearch(document.getElementById('searchInput').value);
@@ -1905,11 +2240,11 @@ function renderHeroLine(session, domainMap) {
   if (!el) return;
   const domains = [...domainMap.values()];
   const thirdParty = domains.filter(d => d.party === 'third-party');
-  const trackers = domains.filter(d => d.category);
+  const trackers = domains.filter(d => TRACKING_CATEGORIES.has(d.category));
   const pageHost = hostOf(session.pageUrl);
   if (!session.requests?.length) {
     el.innerHTML = `<div class="hero-headline">No requests captured yet for <em>${esc(pageHost)}</em>.</div>
-      <div class="hero-sub">Reload the page with WebLens active, then reopen the dashboard.</div>`;
+      <div class="hero-sub">Reload the page with Observa active, then reopen the dashboard.</div>`;
     return;
   }
 
@@ -2072,6 +2407,18 @@ function hideJourney() {
 
 // ── Graph mode toggle (map / table) — folds the old separate Table vtab
 // into the Graph view itself, per the design pass. ────────────────────────────
+// Below this many domains a force-directed graph is a speck in an empty
+// canvas — there is no shape to read, and the table says strictly more. The
+// graph stays one click away and takes over on its own once a page is busy
+// enough to be worth drawing.
+const GRAPH_MIN_DOMAINS = 8;
+let _graphModeChosenByUser = false;
+
+function autoGraphMode(domainCount) {
+  if (_graphModeChosenByUser) return;
+  setGraphMode(domainCount >= GRAPH_MIN_DOMAINS ? 'map' : 'table');
+}
+
 function setGraphMode(mode) {
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   document.getElementById('cy-wrap')?.classList.toggle('wl-hidden', mode !== 'map');
@@ -2080,7 +2427,7 @@ function setGraphMode(mode) {
 }
 document.querySelectorAll('.mode-btn').forEach(btn => {
   btn.innerHTML = icon(btn.dataset.mode === 'table' ? 'table' : 'network', { size:13 });
-  btn.addEventListener('click', () => setGraphMode(btn.dataset.mode));
+  btn.addEventListener('click', () => { _graphModeChosenByUser = true; setGraphMode(btn.dataset.mode); });
 });
 
 // ── View tabs ─────────────────────────────────────────────────────────────────
@@ -2088,25 +2435,46 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
 // folded into Graph's mode toggle above, Trend folded into Organizations
 // (renderTrend), and Story/Findings/Protect folded into the Insights overlay.
 function switchView(v) {
-  document.querySelectorAll('.vtab').forEach(t=>t.classList.remove('active'));
-  const btn = document.querySelector(`.vtab[data-view="${v}"]`);
-  if (btn) btn.classList.add('active');
+  document.querySelectorAll('.snav[data-view]').forEach(t => t.classList.toggle('active', t.dataset.view === v));
+  document.getElementById('overview-view').classList.toggle('active', v === 'overview');
+  document.getElementById('data-view').classList.toggle('active', v === 'data');
   document.getElementById('graph-view').style.display = v === 'graph' ? 'flex' : 'none';
   document.getElementById('orgs-view').classList.toggle('active', v === 'orgs');
+  document.getElementById('policy-view').classList.toggle('active', v === 'policy');
+  // The detail panel belongs to the map only.
   document.getElementById('detail').style.display = v === 'graph' ? '' : 'none';
+  // Cytoscape measures its container on init. Now that Overview is the landing
+  // view, the graph is first built while #graph-view is display:none — zero
+  // width and height — so the cose layout resolves against nothing and the
+  // result is unusable (nodes in the corner; fitting that afterwards just
+  // zooms out until they're specks). Rebuilding once, the first time the Map is
+  // actually shown, is what the theme toggle already does for the same reason.
+  if (v === 'graph' && _lastGraphElements && !_graphSizedOnce) {
+    _graphSizedOnce = true;
+    requestAnimationFrame(() => { try { initGraph(_lastGraphElements); } catch {} });
+  }
+  if (v === 'overview') renderOverview();
+  if (v === 'data') renderDataCollected();
+  if (v === 'policy') ensurePolicyAnalysis();
 }
-document.querySelectorAll('.vtab').forEach(btn => {
+document.querySelectorAll('.snav[data-view]').forEach(btn => {
   btn.addEventListener('click', () => switchView(btn.dataset.view));
+});
+document.getElementById('navActivity')?.addEventListener('click', () => {
+  document.getElementById('btnReplay')?.click();
 });
 
 document.getElementById('searchInput').addEventListener('input', e => applySearch(e.target.value));
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
   const key = e.key.toLowerCase();
-  if (key === 'g') switchView('graph');
-  else if (key === 'o') switchView('orgs');
+  if (key === 'o') switchView('overview');
+  else if (key === 'd') switchView('data');
+  else if (key === 'm' || key === 'g') switchView('graph');
+  else if (key === 't') switchView('orgs');
+  else if (key === 'p') switchView('policy');
   else if (key === 'i') document.getElementById('btnInsights')?.click();
   else if (key === 'escape') {
     hideInsights();
@@ -2114,12 +2482,26 @@ document.addEventListener('keydown', e => {
     if (settingsOverlay?.style.display === 'flex') settingsOverlay.style.display = 'none';
     const verifyOverlay = document.getElementById('verify-overlay');
     if (verifyOverlay?.style.display === 'flex') verifyOverlay.style.display = 'none';
+    const policyModal = document.getElementById('policy-modal-overlay');
+    if (policyModal?.style.display === 'flex') policyModal.style.display = 'none';
   }
   else if (key === '/') { e.preventDefault(); document.getElementById('searchInput')?.focus(); }
   else if (key === '?') {
     const bar = document.getElementById('shortcutBar');
     if (bar) bar.classList.toggle('show');
   }
+});
+document.getElementById('btnRefreshView').addEventListener('click', async () => {
+  const btn = document.getElementById('btnRefreshView');
+  btn.disabled = true; btn.textContent = 'Refreshing…';
+  try {
+    const selectedTab = _currentSession?.tabId;
+    allSessions = await loadAllSessions();
+    populateSessions(allSessions);
+    const index = Math.max(0, allSessions.findIndex(s => s.tabId === selectedTab));
+    if (allSessions[index]) { document.getElementById('sessionSelect').value = String(index); await loadSession(allSessions[index].session); }
+    else document.getElementById('captureStatus').textContent = 'No session captured yet';
+  } finally { btn.disabled = false; btn.textContent = 'Refresh view'; }
 });
 document.getElementById('sessionSelect').addEventListener('change', async e => {
   const s = allSessions[parseInt(e.target.value,10)];
@@ -2141,7 +2523,7 @@ async function renderTrend(session) {
   const el = document.getElementById('trend-inner');
   if (!el) return;
 
-  if (!weblensSettings.historyEnabled) {
+  if (!observaSettings.historyEnabled) {
     el.innerHTML = `<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;max-width:420px;margin:0 auto">
       Session history is off by default. Turn it on in ⚙ Settings to see how this site's tracking activity changes day to day —
       counts only, never URLs or cookie names, and fully clearable.
@@ -2155,7 +2537,7 @@ async function renderTrend(session) {
 
   let days = [];
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'weblens:getHistory', etld1: pageEtld1 });
+    const res = await chrome.runtime.sendMessage({ type: 'observa:getHistory', etld1: pageEtld1 });
     days = res?.days ?? [];
   } catch { /* best effort */ }
 
@@ -2256,7 +2638,7 @@ async function renderSettingsPanel() {
   const el = document.getElementById('settings-body');
   if (!el) return;
 
-  const { meta } = await chrome.runtime.sendMessage({ type: 'weblens:getListsMeta' }).catch(() => ({ meta: null }));
+  const { meta } = await chrome.runtime.sendMessage({ type: 'observa:getListsMeta' }).catch(() => ({ meta: null }));
 
   const currentTheme = document.documentElement.getAttribute('data-theme') ?? 'system';
   const themeOption = (value, name, label) => `
@@ -2266,7 +2648,7 @@ async function renderSettingsPanel() {
 
   el.innerHTML = `
     <div style="margin-bottom:14px;font-size:12px;color:var(--muted2);line-height:1.6">
-      Off by default. Everything it stores stays in your browser — WebLens has no server and sends nothing externally — and can be wiped at any time.
+      Off by default. Everything it stores stays in your browser — Observa has no server and sends nothing externally — and can be wiped at any time.
     </div>
 
     <div style="padding:12px 0;border-bottom:1px solid var(--border)">
@@ -2279,7 +2661,7 @@ async function renderSettingsPanel() {
     </div>
 
     <div style="display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
-      <input type="checkbox" id="chkHistory" ${weblensSettings.historyEnabled ? 'checked' : ''} style="margin-top:3px"/>
+      <input type="checkbox" id="chkHistory" ${observaSettings.historyEnabled ? 'checked' : ''} style="margin-top:3px"/>
       <label for="chkHistory" style="cursor:pointer">
         <div style="font-weight:600;font-size:13px">Session history / trend</div>
         <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">Keeps one count summary per site per day (up to 30 days) so the Trend tab can show whether tracking activity is increasing. Counts only — never URLs, cookie names, or raw requests.</div>
@@ -2289,13 +2671,13 @@ async function renderSettingsPanel() {
     <div id="clearDurableStatus" style="margin-top:8px;font-size:11px;color:var(--muted)"></div>
 
     <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border);display:flex;align-items:flex-start;gap:12px">
-      <input type="checkbox" id="chkListRefresh" ${weblensSettings.listRefreshEnabled ? 'checked' : ''} style="margin-top:3px"/>
+      <input type="checkbox" id="chkListRefresh" ${observaSettings.listRefreshEnabled ? 'checked' : ''} style="margin-top:3px"/>
       <label for="chkListRefresh" style="cursor:pointer;flex:1">
         <div style="font-weight:600;font-size:13px">Tracker &amp; cookie list updates</div>
         <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">
-          The bundled tracker list and cookie database are dated snapshots and go stale over time, so WebLens re-fetches
+          The bundled tracker list and cookie database are dated snapshots and go stale over time, so Observa re-fetches
           the same two public sources they were built from (Disconnect's tracker list, the Open Cookie Database) about once a
-          day, on by default. This is the only outbound request WebLens itself ever makes — no browsing data is sent, only a plain fetch of
+          day, on by default. This is the only outbound request Observa itself ever makes — no browsing data is sent, only a plain fetch of
           two fixed public files. Turn it off here at any time to go back to the bundled snapshot only.
         </div>
       </label>
@@ -2324,22 +2706,22 @@ async function renderSettingsPanel() {
     // theme from this settings panel left the graph's node/edge colors
     // stuck on whichever theme was active on last render (the small topbar
     // toggle already did this; this second theme-change entry point didn't).
-    if (_lastGraphElements) initGraph(_lastGraphElements);
+    if (cy) { try { cy.style(graphStyle()); } catch {} }
   });
 
   document.getElementById('chkHistory').addEventListener('change', async e => {
     const checked = e.target.checked;
-    await chrome.runtime.sendMessage({ type: 'weblens:setSetting', key: 'historyEnabled', value: checked });
-    weblensSettings.historyEnabled = checked;
+    await chrome.runtime.sendMessage({ type: 'observa:setSetting', key: 'historyEnabled', value: checked });
+    observaSettings.historyEnabled = checked;
   });
   document.getElementById('chkListRefresh').addEventListener('change', async e => {
     const checked = e.target.checked;
-    await chrome.runtime.sendMessage({ type: 'weblens:setSetting', key: 'listRefreshEnabled', value: checked });
-    weblensSettings.listRefreshEnabled = checked;
+    await chrome.runtime.sendMessage({ type: 'observa:setSetting', key: 'listRefreshEnabled', value: checked });
+    observaSettings.listRefreshEnabled = checked;
     if (checked) {
       const status = document.getElementById('listsStatus');
       if (status) status.textContent = 'Enabled — checking now…';
-      const result = await chrome.runtime.sendMessage({ type: 'weblens:refreshListsNow' });
+      const result = await chrome.runtime.sendMessage({ type: 'observa:refreshListsNow' });
       if (result?.ok) {
         renderSettingsPanel(); // re-render to surface the "Revert" button, same as the manual check
         return;
@@ -2352,7 +2734,7 @@ async function renderSettingsPanel() {
     const status = document.getElementById('listsStatus');
     if (btn) btn.disabled = true;
     if (status) status.textContent = 'Checking…';
-    const result = await chrome.runtime.sendMessage({ type: 'weblens:refreshListsNow' });
+    const result = await chrome.runtime.sendMessage({ type: 'observa:refreshListsNow' });
     if (btn) btn.disabled = false;
     if (status) status.textContent = result?.ok
       ? fmtListsUpdated({ lastSuccess: result.checkedAt, trackerCount: result.trackerCount, cookieExactCount: result.cookieExactCount, cookieWildcardCount: result.cookieWildcardCount })
@@ -2360,16 +2742,16 @@ async function renderSettingsPanel() {
     if (result?.ok) renderSettingsPanel(); // re-render to surface the "Revert" button
   });
   document.getElementById('btnRevertLists')?.addEventListener('click', async () => {
-    await chrome.runtime.sendMessage({ type: 'weblens:clearLiveLists' });
+    await chrome.runtime.sendMessage({ type: 'observa:clearLiveLists' });
     renderSettingsPanel();
   });
   document.getElementById('btnClearDurable').addEventListener('click', async () => {
-    await chrome.runtime.sendMessage({ type: 'weblens:clearDurableData' });
+    await chrome.runtime.sendMessage({ type: 'observa:clearDurableData' });
     const status = document.getElementById('clearDurableStatus');
     if (status) status.textContent = 'Cleared. New data will only accumulate again for features left enabled above.';
   });
   document.getElementById('btnClearBlocks').addEventListener('click', async () => {
-    await chrome.runtime.sendMessage({ type: 'weblens:clearAllBlocks' });
+    await chrome.runtime.sendMessage({ type: 'observa:clearAllBlocks' });
     blockedForSite = new Set();
     const status = document.getElementById('clearBlocksStatus');
     if (status) status.textContent = 'All blocks removed. Reload any affected pages to restore normal loading.';
@@ -2382,8 +2764,15 @@ function updateThemeButtonIcon() {
   const btn = document.getElementById('btnTheme');
   if (!btn) return;
   const theme = document.documentElement.getAttribute('data-theme') ?? 'system';
-  btn.innerHTML = icon(THEME_ICON[theme] ?? 'monitor', { size:13 });
-  btn.title = `Theme: ${theme[0].toUpperCase()}${theme.slice(1)} (click to change)`;
+  const name = `${theme[0].toUpperCase()}${theme.slice(1)}`;
+  // The theme control is a sidebar row now, not a bare icon button — write
+  // into its icon slot and label rather than replacing the whole button.
+  const slot = btn.querySelector('.snav-ico');
+  const label = btn.querySelector('span:last-child');
+  if (slot) slot.innerHTML = icon(THEME_ICON[theme] ?? 'monitor', { size: 14 });
+  else btn.innerHTML = icon(THEME_ICON[theme] ?? 'monitor', { size: 14 });
+  if (label) label.textContent = name;
+  btn.title = `Theme: ${name} (click to change)`;
 }
 document.getElementById('btnTheme')?.addEventListener('click', async () => {
   await cycleTheme();
@@ -2393,7 +2782,7 @@ document.getElementById('btnTheme')?.addEventListener('click', async () => {
   // the rest of the page does — rebuild the graph with the same elements
   // so node/edge colors pick up the new theme immediately, not on next
   // session switch.
-  if (_lastGraphElements) initGraph(_lastGraphElements);
+  if (cy) { try { cy.style(graphStyle()); } catch {} }
 });
 
 document.getElementById('btnSettings')?.addEventListener('click', () => {
@@ -2462,22 +2851,1055 @@ document.getElementById('btnVerifyClose')?.addEventListener('click', () => {
   if (_detailNodeData) renderDetail(_detailNodeData);
 });
 
+// ── Policy Intelligence ──────────────────────────────────────────────────────
+// Auto-discovers a site's Privacy Policy / Terms of Use / Cookie Policy,
+// extracts plain-language findings from their actual text (local pattern
+// matching — see policy/extract.js), and shows a verdict-per-clause reading
+// rather than a raw summary. Every finding must trace back to real matched
+// text (see "View Evidence"); Observa does not claim a topic is addressed or
+// not addressed beyond what its patterns actually found. Informational only
+// — not legal advice (surfaced directly in the header card, not buried).
+
+const PI_DOC_TYPES = [
+  { value: 'privacy', label: 'Privacy Policy' },
+  { value: 'terms', label: 'Terms of Use' },
+  { value: 'cookie', label: 'Cookie Policy' },
+  { value: 'other', label: 'Other document' },
+];
+
+function pi_toneDot(tone, importance) {
+  if (tone === 'good') return 'pi-green';
+  if (tone === 'neutral') return 'pi-gray';
+  if (importance === 'high') return 'pi-red';
+  if (importance === 'medium') return 'pi-orange';
+  return 'pi-gray';
+}
+
+// Triggered when the Policy tab is opened. Uses whatever's cached
+// (loadSession already populated _policyIntel from storage); if nothing has
+// ever been analyzed for this tab/page, kicks off auto-discovery — a real
+// fetch of the page's own HTML plus, if found, its policy documents (see
+// background/policy-intel.js for exactly what that does and does not send).
+// Background analysis kicked off on session load. Re-renders the screens that
+// depend on policy data once it lands, so the Overview fills in on its own
+// rather than waiting for a tab visit. Silent on failure — the Policy tab
+// still shows the real error, and a failed fetch must not break the rest of
+// the dashboard.
+async function autoAnalyzePolicy() {
+  const session = _currentSession;
+  if (!session?.pageUrl || !/^https?:\/\//i.test(session.pageUrl)) return;
+  // Already analyzed for this exact page — nothing to do.
+  if (_policyIntel?.pageUrl === session.pageUrl &&
+      (_policyIntel.status === 'done' || _policyIntel.status === 'error')) return;
+  try {
+    await runPolicyAnalysis({ force: false });
+  } catch { /* the Policy tab reports this properly; don't break the dashboard */ }
+  // The session may have been switched while this was in flight — only paint
+  // if the result still belongs to what is on screen.
+  if (_currentSession !== session) return;
+  renderOverview();
+  if (document.getElementById('data-view')?.classList.contains('active')) renderDataCollected();
+}
+
+async function ensurePolicyAnalysis() {
+  if (!_currentSession) { renderPolicyView(); return; }
+  if (_policyIntel?.pageUrl === _currentSession.pageUrl && (_policyIntel.status === 'done' || _policyIntel.status === 'error')) {
+    renderPolicyView();
+    return;
+  }
+  await runPolicyAnalysis({ force: false });
+}
+
+async function runPolicyAnalysis({ force }) {
+  if (!_currentSession?.pageUrl || _policyAnalyzing) return;
+  _policyAnalyzing = true;
+  _policyIntel = { ...( _policyIntel ?? {}), status: force ? 'discovering' : (_policyIntel?.status ?? 'discovering'), documents: _policyIntel?.documents ?? [], findings: _policyIntel?.findings ?? [] };
+  renderPolicyView();
+  try {
+    _policyIntel = await chrome.runtime.sendMessage({
+      type: 'observa:analyzePolicy', tabId: _currentSession.tabId, pageUrl: _currentSession.pageUrl, force: !!force,
+    });
+  } catch (err) {
+    _policyIntel = { ..._policyIntel, status: 'error', error: String(err?.message ?? err) };
+  }
+  _policyAnalyzing = false;
+  renderPolicyView();
+}
+
+function pi_docPill(doc) {
+  const label = doc.title ?? doc.type;
+  if (doc.ok === false) {
+    return `<span class="pi-doc-pill pi-doc-failed" title="${esc(doc.error ?? 'Could not fetch')}">${icon('alert-triangle',{size:11})} ${esc(label)} — couldn't be fetched</span>`;
+  }
+  const link = doc.url ? `<a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>` : esc(label);
+  return `<span class="pi-doc-pill pi-doc-found">${icon('check-circle',{size:11})} ${link}</span>`;
+}
+
+// Renders the matched clause inside its surrounding paragraph with the exact
+// matched phrase marked, so the user reads the sentence in context rather
+// than a clipped fragment. Falls back to the plain snippet for findings
+// stored before evidenceFull/evidenceOffset existed, or when the offsets
+// don't line up (splitForHighlight returns null rather than guessing).
+function pi_evidenceQuote(f) {
+  const parts = splitForHighlight(f.evidenceFull, f.evidenceOffset, f.matchText?.length ?? 0);
+  if (!parts) return `<blockquote class="pi-evidence-quote">${esc(f.evidence)}</blockquote>`;
+  const lead = f.evidenceTruncated ? '…' : '';
+  const tail = f.evidenceTruncated ? '…' : '';
+  return `<blockquote class="pi-evidence-quote">${lead}${esc(parts.before)}<mark class="pi-mark">${esc(parts.match)}</mark>${esc(parts.after)}${tail}</blockquote>`;
+}
+
+function renderPolicyCard(f, idx) {
+  const dotClass = pi_toneDot(f.tone, f.importance);
+  const confClass = `pi-conf-${f.confidence}`;
+  // A text-fragment deep link straight to this clause in the live document.
+  // Null for pasted text (nothing to link to) and for a match too short to
+  // anchor on — see policy/locate.js for exactly when this can fail to
+  // highlight, which is why the label says "Open" rather than promising a jump.
+  const jumpUrl = buildEvidenceLink(f.sourceUrl, f.matchText, f.sectionId);
+  // The label stays short and stable. The section name is already shown on the
+  // evidence meta line directly above this button, so repeating it here was
+  // redundant — and real policy headings can be long enough ("For Reader
+  // Surveys, Research, Panels and Experience Programs") to blow out the
+  // button. It moves to the tooltip instead.
+  const jumpTitle = f.section
+    ? `Opens ${f.sourceDocument} at “${f.section}”`
+    : `Opens ${f.sourceDocument}`;
+  const jumpBtn = jumpUrl
+    ? `<a class="pi-jump-btn" href="${esc(jumpUrl)}" target="_blank" rel="noopener noreferrer" title="${esc(jumpTitle)}">${icon('external-link',{size:11})} Open in ${esc(f.sourceDocument)}</a>`
+    : '';
+  // Say what the link will actually do, which depends on whether the document
+  // gave its section heading an anchor — with one, a failed text match still
+  // lands on the right section; without one, it falls back to the top.
+  const jumpNote = jumpUrl
+    ? (f.sectionId
+        ? `<div class="pi-jump-note">Opens the real document at this section and highlights the passage.</div>`
+        : `<div class="pi-jump-note">Opens the real document and highlights this passage. This document doesn't label its sections with links, so if the site blocks text highlighting it will open at the top.</div>`)
+    : (f.sourceUrl ? '' : `<div class="pi-jump-note">This came from text you pasted, so there's no page to open.</div>`);
+
+  return `
+    <div class="pi-card" data-idx="${idx}">
+      <div class="pi-card-hd">
+        <span class="pi-dot ${dotClass}"></span>
+        <span class="pi-title">${esc(f.title)}</span>
+        <span class="pi-doc-tag">${esc(f.sourceDocument)}</span>
+        <button type="button" class="pi-evidence-btn">View Evidence</button>
+      </div>
+      <div class="pi-summary">${esc(f.summary)}</div>
+      <div class="pi-card-body">
+        <div class="pi-body-row">
+          <div class="pi-body-label">Why it matters</div>
+          <div class="pi-body-text">${esc(f.explanation)}</div>
+        </div>
+        <div class="pi-body-row">
+          <div class="pi-body-label">Recommendation</div>
+          <div class="pi-body-text">${esc(f.recommendation)}</div>
+        </div>
+        <div class="pi-body-row">
+          <div class="pi-body-label">Evidence</div>
+          <div class="pi-evidence-block">
+            <div class="pi-evidence-meta">
+              <span>${esc(f.sourceDocument)}</span>
+              <span>·</span>
+              <span>${f.section ? esc(f.section) : 'Section not identifiable'}</span>
+              <span>·</span>
+              <span class="pi-conf ${confClass}">${f.confidence[0].toUpperCase()+f.confidence.slice(1)} confidence</span>
+            </div>
+            ${pi_evidenceQuote(f)}
+            <div class="pi-evidence-actions">${jumpBtn}</div>
+            ${jumpNote}
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── Policy vs. what actually happened ───────────────────────────────────────
+// Each comparison stands alone with its own status and caveat — deliberately
+// never rolled up into a page-level verdict (see CONTEXT.md's Summarization
+// Rule, and policy/compare.js for the reasoning behind each status).
+const PI_CMP_META = {
+  tension:    { cls: 'pi-cmp-tension',    icon: 'alert-triangle', label: 'Worth a closer look' },
+  consistent: { cls: 'pi-cmp-consistent', icon: 'check-circle',   label: 'Matches what we saw' },
+  context:    { cls: 'pi-cmp-context',    icon: 'info',           label: 'Context' },
+};
+
+// The same company often shows up as several domains in one category
+// ("Google · Content" twice), which reads as a rendering bug rather than as
+// information. Collapse to one chip per company-and-category and carry the
+// combined request count.
+const MAX_SHOWN_CHIPS = 6;
+function pi_dedupeDomains(domains) {
+  const byLabel = new Map();
+  for (const d of domains ?? []) {
+    const label = d.organization || d.etld1;
+    const key = `${label}|${d.category ?? ''}`;
+    if (!byLabel.has(key)) byLabel.set(key, { label, category: d.category, requestCount: 0 });
+    byLabel.get(key).requestCount += d.requestCount ?? 0;
+  }
+  return [...byLabel.values()].sort((a, b) => b.requestCount - a.requestCount);
+}
+
+function renderComparisonCard(c, idx) {
+  const meta = PI_CMP_META[c.status] ?? PI_CMP_META.context;
+  // Only a mismatch earns the full card. A "matches what we saw" result is
+  // reassurance — it should cost one line, not half a screen, or the least
+  // actionable outcome ends up dominating the page.
+  const open = c.status === 'tension';
+
+  const deduped = pi_dedupeDomains(c.observedDomains);
+  const shown = deduped.slice(0, MAX_SHOWN_CHIPS);
+  const overflow = deduped.length - shown.length;
+  const domains = shown.length
+    ? `<div class="pi-cmp-domains">${shown.map(d =>
+        `<span class="pi-cmp-domain">${esc(d.label)}${d.category ? `<span class="pi-cmp-domain-cat">${esc(d.category)}</span>` : ''}</span>`
+      ).join('')}${overflow > 0 ? `<span class="pi-cmp-domain pi-cmp-more">+${overflow} more</span>` : ''}</div>`
+    : '';
+
+  return `
+    <div class="pi-cmp ${meta.cls}${open ? ' open' : ''}" data-cmp-idx="${idx}">
+      <button type="button" class="pi-cmp-hd">
+        <span class="pi-cmp-badge">${icon(meta.icon,{size:11})} ${meta.label}</span>
+        <span class="pi-cmp-title">${esc(c.title)}</span>
+        <span class="pi-cmp-chev">${icon('chevron-right',{size:13})}</span>
+      </button>
+      <div class="pi-cmp-body">
+        <div class="pi-cmp-cols">
+          <div class="pi-cmp-col">
+            <div class="pi-cmp-col-label">What the policy says</div>
+            <blockquote class="pi-cmp-quote">${esc(c.declared.evidence)}</blockquote>
+            <div class="pi-cmp-src">${esc(c.declared.sourceDocument)}${c.declared.section ? ` · ${esc(c.declared.section)}` : ''}</div>
+          </div>
+          <div class="pi-cmp-col">
+            <div class="pi-cmp-col-label">What Observa observed</div>
+            <div class="pi-cmp-observed">${esc(c.observedText)}</div>
+            ${domains}
+          </div>
+        </div>
+        <div class="pi-cmp-caveat">${icon('info',{size:11})} ${esc(c.caveat)}</div>
+      </div>
+    </div>`;
+}
+
+// One plain sentence carrying the actual takeaway, in the same editorial voice
+// as the graph view's hero line — replacing a paragraph of framing the reader
+// has to parse before reaching anything specific.
+function pi_comparisonHeadline(comparisons) {
+  const tension = comparisons.filter(c => c.status === 'tension').length;
+  const total = comparisons.length;
+  if (tension === 0) {
+    return `Everything Observa could check in these documents <em>lined up</em> with what it saw this page do.`;
+  }
+  return `<em>${tension}</em> of ${total} checks <em>didn’t line up</em> with what Observa saw this page do.`;
+}
+
+function renderPolicyView() {
+  const el = document.getElementById('policy-inner');
+  if (!el) return;
+
+  if (!_currentSession) {
+    el.innerHTML = `<p class="pi-empty">Observa reads a site's privacy policy, terms and cookie policy, then shows the clauses worth knowing about \u2014 and flags where they don't match what the page actually did.<br/><br/>Open a site with Observa running, then come back here.</p>`;
+    return;
+  }
+
+  const d = _policyIntel;
+  const status = d?.status ?? 'idle';
+  const documents = d?.documents ?? [];
+  const findings = d?.findings ?? [];
+
+  const foundTypes = new Set(documents.filter(doc => doc.ok !== false).map(doc => doc.type));
+  const autoTypes = ['privacy', 'terms', 'cookie'];
+  const pillsForAuto = autoTypes.map(type => {
+    const doc = documents.find(x => x.type === type);
+    if (doc) return pi_docPill(doc);
+    return `<span class="pi-doc-pill pi-doc-missing">${icon('file-text',{size:11})} ${esc(PI_DOC_TYPES.find(t=>t.value===type)?.label ?? type)} — not found</span>`;
+  });
+  const manualDocs = documents.filter(doc => doc.discoveredVia === 'manual' && !autoTypes.includes(doc.type));
+
+  const docCountLabel = foundTypes.size === 0 ? 'No documents found yet' : `${documents.filter(x=>x.ok!==false).length} document${documents.filter(x=>x.ok!==false).length===1?'':'s'} found`;
+
+  let statusLine = '';
+  if (status === 'discovering') statusLine = `<div class="pi-status-line"><span class="pi-spinner"></span> Looking for this site's privacy, terms, and cookie policy links…</div>`;
+  else if (status === 'analyzing') statusLine = `<div class="pi-status-line"><span class="pi-spinner"></span> Reading the documents that were found…</div>`;
+  else if (status === 'error') statusLine = `<div class="pi-status-line" style="color:rgb(var(--warning-rgb))">${icon('alert-triangle',{size:12})} ${esc(d.error ?? 'Something went wrong.')}</div>`;
+
+  const busy = status === 'discovering' || status === 'analyzing';
+
+  const findingsHtml = findings.length
+    ? findings.map((f, i) => renderPolicyCard(f, i)).join('')
+    : (status === 'done'
+        ? `<p class="pi-empty">Observa read the document but didn't recognize any of the clauses it watches for. That is a limit of its patterns, not a verdict on the policy \u2014 the sections below list exactly what it looked for.</p>`
+        : (busy ? '' : `<p class="pi-empty">Observa can fetch this site's privacy policy, terms and cookie policy, then show the clauses worth knowing about \u2014 each one quoted from the document itself.<br/><br/>Use <strong>Re-analyze</strong> above to start, or paste a document with <strong>Analyze a policy\u2026</strong></p>`));
+
+  // ── Policy vs. what actually happened ────────────────────────────────────
+  // Mismatches first — they are the only rows that need reading in full.
+  const comparisons = [...(d?.comparisons ?? [])].sort((a, b) =>
+    (a.status === 'tension' ? 0 : 1) - (b.status === 'tension' ? 0 : 1));
+  const comparisonHtml = comparisons.length
+    ? `<div class="pi-section-label">Policy vs. what actually happened</div>
+       <div class="pi-cmp-headline">${pi_comparisonHeadline(comparisons)}</div>
+       <div class="pi-cmp-note">Each row stands on its own. This is not a score, and a mismatch is not proof of wrongdoing — open a row for why.</div>
+       <div id="policy-comparisons">${comparisons.map((c,i)=>renderComparisonCard(c,i)).join('')}</div>`
+    : '';
+
+  // ── What we couldn't check, and what we didn't find ──────────────────────
+  // Both of these exist so that "no card here" is never silently read as
+  // "nothing to worry about." See policy/compare.js and the unmatchedCategories
+  // note in background/policy-intel.js.
+  const notComparable = d?.notComparable ?? [];
+  const notComparableHtml = notComparable.length
+    ? `<details class="pi-details">
+         <summary>${icon('info',{size:12})} ${notComparable.length} finding${notComparable.length===1?'':'s'} Observa can't check against browser behavior</summary>
+         <div class="pi-details-body">
+           <p>These clauses are about things that happen on the company's servers, in a courtroom, or over time — none of which a browser extension can observe. Observa can tell you the document says them; it can't confirm or contradict them.</p>
+           <div class="pi-chiplist">${notComparable.map(n=>`<span class="pi-chip">${esc(n.title)}</span>`).join('')}</div>
+         </div>
+       </details>`
+    : '';
+
+  const notFound = d?.notFound ?? [];
+  const notFoundHtml = notFound.length
+    ? `<details class="pi-details">
+         <summary>${icon('search',{size:12})} ${notFound.length} topic${notFound.length===1?'':'s'} we looked for and didn't find</summary>
+         <div class="pi-details-body">
+           <p><strong>This does not mean the documents are silent on these.</strong> It means Observa's patterns didn't recognize any language about them in what it read. A policy that words something unusually will show up here even though it does address the topic — so treat this as a limit of the scanner, not a fact about the company.</p>
+           <div class="pi-chiplist">${notFound.map(n=>`<span class="pi-chip pi-chip-muted">${esc(n.title)}</span>`).join('')}</div>
+         </div>
+       </details>`
+    : '';
+
+  el.innerHTML = `
+    <div class="pi-head-card">
+      <div class="pi-head-top">
+        <div class="pi-head-title">${icon('shield-check',{size:16})} Policy Intelligence</div>
+        <div class="pi-head-actions">
+          <button type="button" class="pi-btn" id="btnPolicyReanalyze" ${busy?'disabled':''}>${icon('refresh-cw',{size:12})} Re-analyze</button>
+          <button type="button" class="pi-btn" id="btnPolicyManual">${icon('file-text',{size:12})} Analyze a policy…</button>
+        </div>
+      </div>
+      <div class="pi-disclaimer">${esc(d?.disclaimer ?? 'Observa provides informational analysis, not legal advice.')}</div>
+      <div class="pi-doclist">${pillsForAuto.join('')}${manualDocs.map(pi_docPill).join('')}</div>
+      ${statusLine}
+    </div>
+    ${comparisonHtml}
+    ${findings.length ? `<div class="pi-section-label">Things You Should Know</div>` : ''}
+    <div id="policy-findings">${findingsHtml}</div>
+    ${notComparableHtml}
+    ${notFoundHtml}
+  `;
+}
+
+// ── Manual "Analyze a policy" modal ─────────────────────────────────────────
+function renderPolicyModal() {
+  const el = document.getElementById('policy-modal-body');
+  if (!el) return;
+  el.innerHTML = `
+    <div class="pi-form-row">
+      <label class="pi-form-label" for="piDocType">Document type</label>
+      <select id="piDocType">${PI_DOC_TYPES.map(t=>`<option value="${t.value}">${t.label}</option>`).join('')}</select>
+    </div>
+    <div class="pi-form-row">
+      <label class="pi-form-label" for="piUrl">Policy URL</label>
+      <input type="text" id="piUrl" placeholder="https://example.com/privacy"/>
+      <div class="pi-form-hint">Observa will fetch this page directly (no cookies sent) and analyze its text.</div>
+    </div>
+    <div class="pi-form-or">or</div>
+    <div class="pi-form-row">
+      <label class="pi-form-label" for="piText">Paste policy text</label>
+      <textarea id="piText" placeholder="Paste the full policy text here…"></textarea>
+    </div>
+    <button type="button" class="pi-btn" id="btnPolicyAnalyzeSubmit">${icon('shield-check',{size:12})} Analyze</button>
+    <div class="pi-form-status" id="piFormStatus"></div>
+  `;
+  document.getElementById('btnPolicyAnalyzeSubmit').addEventListener('click', async () => {
+    const docType = document.getElementById('piDocType').value;
+    const url = document.getElementById('piUrl').value.trim();
+    const text = document.getElementById('piText').value.trim();
+    const status = document.getElementById('piFormStatus');
+    if (!url && !text) { status.textContent = 'Paste a URL or the policy text first.'; status.className = 'pi-form-status pi-form-error'; return; }
+    if (!_currentSession) { status.textContent = 'No active session to attach this to.'; status.className = 'pi-form-status pi-form-error'; return; }
+    status.textContent = 'Analyzing…'; status.className = 'pi-form-status';
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: 'observa:analyzeManualPolicy', tabId: _currentSession.tabId, pageUrl: _currentSession.pageUrl,
+        docType, url: url || undefined, text: text || undefined,
+      });
+      if (result?.error) throw new Error(result.error);
+      _policyIntel = result;
+      renderPolicyView();
+      document.getElementById('policy-modal-overlay').style.display = 'none';
+    } catch (err) {
+      status.textContent = String(err?.message ?? err);
+      status.className = 'pi-form-status pi-form-error';
+    }
+  });
+}
+
+document.getElementById('policy-inner')?.addEventListener('click', e => {
+  const reanalyze = e.target.closest('#btnPolicyReanalyze');
+  if (reanalyze) { runPolicyAnalysis({ force: true }); return; }
+
+  const manual = e.target.closest('#btnPolicyManual');
+  if (manual) {
+    renderPolicyModal();
+    document.getElementById('policy-modal-overlay').style.display = 'flex';
+    return;
+  }
+
+  const hd = e.target.closest('.pi-card-hd');
+  if (hd) { hd.closest('.pi-card')?.classList.toggle('open'); return; }
+
+  const cmpHd = e.target.closest('.pi-cmp-hd');
+  if (cmpHd) { cmpHd.closest('.pi-cmp')?.classList.toggle('open'); return; }
+});
+document.getElementById('btnPolicyModalClose')?.addEventListener('click', () => {
+  document.getElementById('policy-modal-overlay').style.display = 'none';
+});
+
+// ── Overview ─────────────────────────────────────────────────────────────────
+// The redesign's front door. Everything here is built from data already
+// captured for this session plus whatever Policy Intelligence has cached — no
+// new observation, no new permission, and nothing fetched to render it.
+//
+// The verdict is a worded band with no number (see shared/verdict.js for why
+// the requested 0-100 dial was declined), and it always shows the specific
+// reasons that produced it directly underneath rather than behind a tooltip.
+
+const OV_SEVERE_TYPES = new Set(['email', 'phone', 'geo', 'zip']);
+
+// Reduces the session's exposure rows to the two things the Overview needs:
+// which personal-data types were actually seen, and how many tracking
+// identifiers. Labels come from the same EXPOSURE_TYPE_LABEL map the rest of
+// the UI uses, so wording never diverges.
+// Splits observed exposures by WHO RECEIVED THEM.
+//
+// A site sending its own session_id to itself is how staying logged in works,
+// and a form you filled in posting your email back to that same site is the
+// form working. Neither is tracking, and counting them as such is what pushed
+// an ordinary page to "Use with caution" on the strength of its own login
+// cookie. Only what reaches a *different* company is evidence of anything, so
+// the verdict is fed the third-party counts and the first-party ones are kept
+// separately — still shown on the screen, never used to escalate.
+function ov_exposureSummary(domainMap, cookies) {
+  const personal = new Set();            // third-party only — drives the verdict
+  const personalFirstParty = new Set();  // shown, but never escalates
+  let trackingIds = 0;
+  let trackingIdsFirstParty = 0;
+  for (const row of buildSessionExposures(domainMap, cookies)) {
+    const isThirdParty = row.party === 'third-party';
+    for (const e of row.exposures) {
+      const label = EXPOSURE_TYPE_LABEL[e.type] ?? e.type;
+      if (OV_SEVERE_TYPES.has(e.type)) {
+        (isThirdParty ? personal : personalFirstParty).add(label);
+      } else if (e.type === 'id') {
+        if (isThirdParty) trackingIds++; else trackingIdsFirstParty++;
+      }
+    }
+  }
+  return {
+    personalTypes: [...personal],
+    trackingIds,
+    personalTypesFirstParty: [...personalFirstParty],
+    trackingIdsFirstParty,
+  };
+}
+
+function ov_confidenceBars(level) {
+  const on = level === 'high' ? 3 : level === 'medium' ? 2 : 1;
+  return [8, 12, 16].map((h, i) =>
+    `<span class="ov-conf-bar${i < on ? ' on' : ''}" style="height:${h}px"></span>`).join('');
+}
+
+
+// "Not analyzed yet", "analyzed and found nothing" and "couldn't be fetched"
+// are three different facts, and collapsing them into "No policy analyzed yet"
+// told a user whose site simply has no discoverable policy that Observa had
+// not tried. It had — that is the answer.
+function ov_policyScanLine(policy, docsRead) {
+  if (docsRead) return `${docsRead} policy document${docsRead === 1 ? '' : 's'} analyzed`;
+  const status = policy?.status;
+  if (!policy || status === 'idle') return 'No policy analyzed yet';
+  if (status === 'discovering' || status === 'analyzing') return 'Looking for this site\u2019s policy\u2026';
+  if (status === 'error') return 'Couldn\u2019t reach this site\u2019s policy \u2014 paste one in Policy';
+  // Found a policy link but every document failed to load is NOT the same as
+  // finding no policy at all. Saying "none found" there denies the document
+  // exists, when what actually happened is we could not read it.
+  if ((policy?.documents ?? []).length) {
+    return 'Found this site\u2019s policy but couldn\u2019t read it \u2014 paste it in Policy';
+  }
+  return 'No policy found on this site \u2014 you can paste one in Policy';
+}
+
+// A tile is a claim; `goto` is where that claim's evidence lives. A number with
+// no way to reach the records behind it asks the reader to take it on trust,
+// which is the opposite of what this product is for. `filter` pre-narrows the
+// destination so the reader lands on the matching rows, not on everything.
+function ov_tile(iconName, label, value, delta, goto, filter, hint) {
+  const nav = goto
+    ? ` data-goto="${esc(goto)}"${filter ? ` data-goto-filter="${esc(filter)}"` : ''}`
+    : '';
+  const Tag = goto ? 'button' : 'div';
+  return `
+    <${Tag} class="ov-tile${goto ? ' ov-tile-link' : ''}"${nav}${goto ? ' type="button"' : ''}${
+      goto && hint ? ` title="${esc(hint)}"` : ''}>
+      <div class="ov-tile-hd"><span class="ov-tile-ico">${icon(iconName,{size:14})}</span>${esc(label)}</div>
+      <div class="ov-tile-n">${value}</div>
+      ${delta ? `<div class="ov-tile-delta">${esc(delta)}</div>` : ''}
+      ${goto ? `<span class="ov-tile-go">${esc(hint ?? 'See the evidence')} \u2192</span>` : ''}
+    </${Tag}>`;
+}
+
+function renderOverview() {
+  const el = document.getElementById('overview-inner');
+  if (!el) return;
+  if (!_currentSession) {
+    el.innerHTML = `<div class="ov-card"><p class="ov-empty">Observa builds this summary from what it watches a page actually do while you browse.<br/><br/>Open any site in another tab with Observa running, then come back \u2014 the assessment, the data it saw leaving the page, and the policy check all appear here.</p></div>`;
+    return;
+  }
+
+  const session = _currentSession;
+  const domainMap = _currentDomainMap ?? buildDomainMap(session);
+  const host = hostOf(session.pageUrl);
+  const domains = [...domainMap.values()];
+  const thirdParty = domains.filter(d => d.party === 'third-party');
+  const trackers = domains.filter(d => d.category);
+  // "Trackers matched" must mean trackers. Content (CDNs, fonts), Anti-fraud
+  // and Consent are classified third parties, not profiling ones — counting
+  // them made Google Fonts read as a tracker on the Overview tile.
+  const trackingDomains = domains.filter(d => TRACKING_CATEGORIES.has(d.category));
+
+  // ONE summary feeds the tiles, the verdict AND the popup.
+  //
+  // The Overview and the popup previously derived these numbers separately.
+  // On youtube.com that produced two screens describing the same page
+  // differently: the popup announced "6 other companies" (it was counting
+  // Google's five domains as five parties) and "Looks reasonable" (it was
+  // re-deriving exposures from URLs, so it never saw the tracking identifier
+  // the dashboard found). Both surfaces now read from summarizeSessionSignals,
+  // so a disagreement is no longer representable.
+  const signals = summarizeSessionSignals({
+    requests: session.requests ?? [],
+    cookies: sessionCookies,
+  });
+  const byCategory = signals.byCategory;
+  const personalTypes = signals.personalDataTypes;
+  const trackingIds = signals.trackingIdCount;
+
+  const policy = _policyIntel ?? null;
+  const policyDocsRead = (policy?.documents ?? []).filter(d => d.ok !== false).length;
+  const policyTensions = (policy?.comparisons ?? []).filter(c => c.status === 'tension').length;
+  const policyConcerns = (policy?.findings ?? []).filter(f => f.tone === 'concern').length;
+
+  // The tile number and the Top concerns rows come from ONE call, so they
+  // cannot disagree — see shared/overview-concerns.js for why that matters.
+  const _overviewConcerns = buildOverviewConcerns({
+    sessionFindings: buildSessionFindings(domainMap, sessionCookies) ?? [],
+    comparisons: policy?.comparisons ?? [],
+    policyFindings: policy?.findings ?? [],
+    policyAnalyzed: !!policy,
+    // Authoritative: a count is only earned by a document that came back. An
+    // attempted-but-failed fetch printed a confident 0 beside a scan card
+    // saying the policy couldn't be reached.
+    policyDocsRead,
+  });
+
+  const verdict = computeVerdict({
+    // From the shared summary, not from a second count of the same map.
+    thirdPartyCount: signals.thirdPartyCount,
+    byCategory,
+    personalDataTypes: personalTypes,
+    trackingIdCount: trackingIds,
+    policyTensions,
+    policyConcerns,
+    policyDocsRead,
+    requestCount: session.requests?.length ?? 0,
+  });
+
+  // ── Verdict + scan summary ───────────────────────────────────────────────
+  const reasonsHtml = verdict.reasons.length
+    ? `<div class="ov-reasons">${verdict.reasons.map(r =>
+        `<div class="ov-reason ov-reason-${r.severity}"><span class="ov-reason-dot"></span><span>${esc(r.text)}</span></div>`).join('')}</div>`
+    : '';
+
+  const verdictCard = `
+    <div class="ov-card ov-band-${verdict.band}">
+      <div class="ov-verdict">
+        <div class="ov-verdict-mark">${icon(verdict.icon,{size:22})}</div>
+        <div style="min-width:0;flex:1">
+          <div class="ov-verdict-kicker">Assessment</div>
+          <div class="ov-verdict-label">${esc(verdict.label)}</div>
+          <div class="ov-verdict-head">${esc(verdict.headline)}</div>
+          ${reasonsHtml}
+        </div>
+      </div>
+      <div class="ov-verdict-foot">This is a plain-language summary of what Observa could actually see, not a score or a rating. Every line above comes from something observed on this page or written in its own policy.</div>
+    </div>`;
+
+  const scanCard = `
+    <div class="ov-card">
+      <div class="ov-conf">
+        <span class="ov-conf-label">Confidence</span>
+        <span class="ov-conf-val">${esc(verdict.confidence[0].toUpperCase() + verdict.confidence.slice(1))}</span>
+        <span class="ov-conf-bars">${ov_confidenceBars(verdict.confidence)}</span>
+      </div>
+      <div class="ov-card-sub">${esc(verdict.confidenceWhy)}</div>
+      <div class="ov-scan-line">${icon('globe',{size:13})} <span>${esc(host)}</span></div>
+      <div class="ov-scan-line">${icon('layers',{size:13})} <span>${session.requests?.length ?? 0} network requests observed</span></div>
+      <div class="ov-scan-line">${icon('cookie',{size:13})} <span>${sessionCookies.length} cookie${sessionCookies.length===1?'':'s'} readable for this site</span></div>
+      <div class="ov-scan-line">${icon('file-text',{size:13})} <span>${esc(ov_policyScanLine(policy, policyDocsRead))}</span></div>
+    </div>`;
+
+  // ── Tiles. A delta is shown only when opt-in history actually has a prior
+  // day to compare against — never a fabricated "vs last scan". ────────────
+  const tiles = `
+    <div class="ov-tiles">
+      ${ov_tile('user', 'Data types seen', personalTypes.length + (trackingIds ? 1 : 0),
+                null, 'data', 'observed', 'See what was sent')}
+      ${ov_tile('users', 'Third parties', signals.thirdPartyCount,
+                null, 'orgs', null, 'See every company')}
+      ${ov_tile('search', 'Trackers matched', signals.trackingDomainCount,
+                null, 'orgs', 'trackers', 'See which trackers')}
+      ${ov_tile('file-text', 'Policy concerns', _overviewConcerns.tileCount ?? '\u2014',
+                null, 'policy', null, 'Read the clauses')}
+    </div>`;
+
+  // ── What happens to your data ────────────────────────────────────────────
+  const youItems = personalTypes.length || trackingIds
+    ? [
+        ...personalTypes.map(t => `<div class="ov-flow-item"><span>${esc(t)}</span><span class="ov-pill ov-pill-high">Observed</span></div>`),
+        ...(trackingIds ? [`<div class="ov-flow-item"><span>Tracking identifier</span><span class="ov-pill ov-pill-med">Observed</span></div>`] : []),
+      ].join('')
+    : `<div class="ov-flow-empty">Nothing matching a personal-data or tracking-ID pattern was seen leaving this page.</div>`;
+
+  const topThird = thirdParty.slice().sort((a,b) => b.requests.length - a.requests.length).slice(0, 4);
+  const thirdItems = topThird.length
+    ? topThird.map(d => `<div class="ov-flow-item"><span>${esc(d.organization || d.domain)}</span>${d.category ? `<span class="ov-pill ov-pill-cat">${esc(d.category)}</span>` : ''}</div>`).join('')
+      + (thirdParty.length > topThird.length ? `<div class="ov-flow-item"><span style="color:var(--muted)">+${thirdParty.length - topThird.length} more</span></div>` : '')
+    : `<div class="ov-flow-empty">No third-party domains were contacted.</div>`;
+
+  const arrow = `<div class="ov-flow-arrow">${icon('chevron-right',{size:16})}</div>`;
+  const flowCard = `
+    <div class="ov-card">
+      <div class="ov-card-hd">
+        <span class="ov-card-title">What happens to your data</span>
+        <button type="button" class="ov-link" data-goto="graph">Open the map →</button>
+      </div>
+      <div class="ov-card-sub">How information moves from you, to ${esc(host)}, and on to other companies — built only from requests Observa actually saw.</div>
+      <div class="ov-flow">
+        <div class="ov-flow-col">
+          <div class="ov-flow-hd">${icon('user',{size:14})} You</div>
+          ${youItems}
+        </div>
+        ${arrow}
+        <div class="ov-flow-col">
+          <div class="ov-flow-hd">${icon('globe',{size:14})} ${esc(host)}</div>
+          <div class="ov-flow-item"><span>${session.requests?.length ?? 0} requests made</span></div>
+          <div class="ov-flow-item"><span>${sessionCookies.length} cookie${sessionCookies.length===1?'':'s'} set or readable</span></div>
+          <div class="ov-flow-item"><span>${thirdParty.length} other compan${thirdParty.length===1?'y':'ies'} contacted</span></div>
+        </div>
+        ${arrow}
+        <div class="ov-flow-col">
+          <div class="ov-flow-hd">${icon('users',{size:14})} Third parties (${thirdParty.length})</div>
+          ${thirdItems}
+        </div>
+      </div>
+    </div>`;
+
+  const concernRows = _overviewConcerns.rows;
+
+  const concernsCard = `
+    <div class="ov-card">
+      <div class="ov-card-hd">
+        <span class="ov-card-title">Top concerns</span>
+        ${policy ? `<button type="button" class="ov-link" data-goto="policy">Policy detail →</button>` : ''}
+      </div>
+      <div class="ov-card-sub">Drawn from observed network activity, cookies, and — where a policy was analyzed — its own wording.</div>
+      ${concernRows.length
+        ? concernRows.map(c => `
+          <div class="ov-concern ov-sev-${esc(c.severity)}">
+            <div class="ov-concern-ico">${icon(c.severity === 'high' ? 'alert-triangle' : 'info',{size:15})}</div>
+            <div style="min-width:0">
+              <div class="ov-concern-title">${esc(c.title)}</div>
+              ${c.body ? `<div class="ov-concern-body">${esc(c.body)}</div>` : ''}
+              <div class="ov-concern-ev">${esc(c.provenance)}${c.evidence ? ` · Evidence: ${esc(c.evidence)}` : ''}</div>
+              <button type="button" class="ov-evidence-link" data-goto="${esc(c.evidenceView || (c.provenance.startsWith('Declared') ? 'policy' : 'orgs'))}" ${c.evidenceDomain ? `data-evidence-domain="${esc(c.evidenceDomain)}"` : ''}>Inspect ${c.provenance.startsWith('Declared') ? 'policy clause' : c.evidenceView === 'data' ? 'data evidence' : c.evidenceDomain ? 'domain evidence' : 'related domains'} →</button>
+            </div>
+          </div>`).join('') + (_overviewConcerns.hiddenCount
+            ? `<p class="ov-more">${_overviewConcerns.hiddenCount} more policy clause${_overviewConcerns.hiddenCount === 1 ? '' : 's'} counted above — <button type="button" class="ov-link" data-goto="policy">see Policy detail →</button></p>`
+            : '')
+        : `<p class="ov-empty">Nothing on this page matched a known tracker or a personal-data pattern.${
+            !policy
+              ? ' Check the site\u2019s own policy next \u2014 that half hasn\u2019t been looked at yet.'
+              : _overviewConcerns.lesserCount
+                ? ` The policy check flagged ${_overviewConcerns.lesserCount} lower-importance clause${_overviewConcerns.lesserCount === 1 ? '' : 's'} \u2014 see Policy detail.`
+                : ' The policy check found no high-importance clauses either.'}</p>`}
+    </div>`;
+
+  el.innerHTML = `
+    <div class="ov-head">
+      <div class="ov-head-row">
+        <div>
+          <h1>Site Overview</h1>
+          <p>What ${esc(host)} did while you were on it, and what its own policy says about it.</p>
+        </div>
+        <button type="button" class="pi-btn" id="btnPreviewReport">${icon('file-text',{size:13})} Preview report</button>
+      </div>
+    </div>
+    <div class="ov-row">${verdictCard}${scanCard}</div>
+    ${tiles}
+    ${flowCard}
+    ${concernsCard}
+  `;
+}
+
+document.getElementById('overview-inner')?.addEventListener('click', e => {
+  const goto = e.target.closest('[data-goto]');
+  if (!goto) return;
+  const view = goto.dataset.goto;
+  const filter = goto.dataset.gotoFilter ?? null;
+  // Apply the destination's filter BEFORE switching, so the view renders
+  // already narrowed rather than flashing the unfiltered list first.
+  if (view === 'data' && filter) { _dcFilter = filter; _dcSelected = null; }
+  if (view === 'orgs') {
+    _orgsTrackersOnly = filter === 'trackers';
+    if (_currentDomainMap) renderOrgGroups(_currentDomainMap, sessionCookies);
+  }
+  switchView(view);
+  if (view === 'data') renderDataCollected();
+  if (view === 'graph' && goto.dataset.evidenceDomain) {
+    const domain = [...(_currentDomainMap?.values() ?? [])].find(d => d.domain === goto.dataset.evidenceDomain);
+    if (domain) renderDetail(domain);
+  }
+});
+
+// ── Data Collected ───────────────────────────────────────────────────────────
+// The Observed-vs-Disclosed join at the data-type level (see
+// shared/data-inventory.js for what it will and will not assert). Built
+// entirely from the exposure detector and cached policy findings — no new
+// observation, no new permission.
+//
+// Two columns the source mockup showed are deliberately absent: "Purpose" and
+// a non-cookie "Retention". Neither is observable from network traffic, and a
+// plausible-looking invented value is worse than an honest omission.
+
+let _dcFilter = 'all';
+let _dcSelected = null;   // row.type
+let _dcRevealed = false;  // per-selection reveal of the exact matched value
+
+const DC_TYPE_ICON = {
+  email: 'user', phone: 'user', zip: 'globe', geo: 'globe',
+  id: 'monitor', page: 'bar-chart', campaign: 'megaphone',
+};
+function dc_icon(row) {
+  if (row.policyOnly) return 'file-text';
+  return DC_TYPE_ICON[row.type] ?? 'package';
+}
+
+// One plain sentence per row saying what its badges mean, so the screen does
+// not need a legend to be read. The badges alone ("Observed", "Not disclosed")
+// are shorthand that only makes sense once you have been taught it — and a
+// four-item key under a one-row table is more teaching than finding.
+//
+// Deliberately says nothing for the ordinary case: a row that was observed and
+// disclosed needs no explanation, and narrating it would bring the noise back.
+
+// Three different facts, three different sentences. Telling someone whose site
+// has no discoverable policy that Observa "hasn't read" it implies it never
+// looked — it did, and finding nothing is the answer.
+function dc_noPolicyTitle(policy) {
+  const s = policy?.status;
+  if (!policy || s === 'idle') return 'No policy analyzed yet';
+  if (s === 'discovering' || s === 'analyzing') return 'Still looking for this site\u2019s policy';
+  if (s === 'error') return 'Couldn\u2019t reach this site\u2019s policy';
+  if ((policy?.documents ?? []).length) return 'Found this site\u2019s policy but couldn\u2019t read it';
+  return 'No policy document found for this site';
+}
+function dc_noPolicyBody(policy) {
+  const s = policy?.status;
+  if (!policy || s === 'idle') {
+    return 'Observa has not read this site\u2019s documents yet, so it cannot say whether this is disclosed.';
+  }
+  if (s === 'discovering' || s === 'analyzing') {
+    return 'This will fill in on its own once the documents have been read.';
+  }
+  if (s === 'error') {
+    return 'The page or its policy could not be fetched, so there is nothing to compare against. You can paste the policy text or a URL on the Policy tab.';
+  }
+  if ((policy?.documents ?? []).length) {
+    return 'Observa found a link to this site\u2019s policy, but the document itself could not be fetched, so there is nothing to compare against. You can paste the policy text or a URL on the Policy tab.';
+  }
+  return 'Observa looked at this page and the site\u2019s own root and found no link to a privacy policy. Many logged-in apps render their footer in JavaScript, which this scanner cannot read. You can paste the policy text or a URL on the Policy tab.';
+}
+
+function dc_rowMeaning(row) {
+  let text = '';
+  if (row.policyOnly) {
+    text = 'The policy mentions this; Observa did not see it leave this page.';
+  } else if (row.observed && !row.disclosureKnown) {
+    text = _policyIntel?.status === 'done'
+      ? 'Seen leaving this page. No policy was found for this site, so there is nothing to compare it against.'
+      : 'Seen leaving this page. No policy read yet, so there is nothing to compare it against.';
+  } else if (row.observed && row.disclosed === false) {
+    text = 'Seen leaving this page, and nothing in the policy we read mentions this category.';
+  }
+  return text ? `<span class="dc-type-why">${esc(text)}</span>` : '';
+}
+
+function dc_badges(row) {
+  const out = [];
+  if (row.observed) out.push(`<span class="dc-badge dc-b-observed">Observed</span>`);
+  if (row.policyOnly) out.push(`<span class="dc-badge dc-b-policy">Policy only</span>`);
+  if (!row.disclosureKnown) out.push(`<span class="dc-badge dc-b-unknown">Policy not read</span>`);
+  else if (row.observed && row.disclosed) out.push(`<span class="dc-badge dc-b-disclosed">Disclosed</span>`);
+  else if (row.observed && !row.disclosed) out.push(`<span class="dc-badge dc-b-undisclosed">Not disclosed</span>`);
+  if (row.sensitive) out.push(`<span class="dc-badge dc-b-sensitive">Sensitive</span>`);
+  return `<div class="dc-badges">${out.join('')}</div>`;
+}
+
+// The timing signal, rendered. "During load" is plain ink; "after the page
+// settled" is the notable case and is the only one that gets colour — the same
+// quiet-by-default rule the badges follow.
+function dc_whenCell(row) {
+  if (!row.observed) return '<span style="color:var(--muted)">not seen</span>';
+  const t = row.timing ?? {};
+  if (t.phase === 'later') {
+    return `<span class="dc-when dc-when-later">${icon('clock',{size:11})} ${esc(formatElapsed(t.elapsedMs))} in</span>
+            <div class="dc-sub">${row.occurrences}× total</div>`;
+  }
+  if (t.phase === 'load') return `<span class="dc-when">During load</span><div class="dc-sub">${row.occurrences}× total</div>`;
+  return `<span class="dc-when">${row.occurrences}×</span>`;
+}
+
+function dc_matchesFilter(row, filter) {
+  if (filter === 'observed') return row.observed;
+  if (filter === 'policy') return row.policyOnly;
+  if (filter === 'undisclosed') return row.observed && row.disclosed === false;
+  if (filter === 'sensitive') return row.sensitive;
+  if (filter === 'after') return row.timing?.phase === 'later';
+  return true;
+}
+
+function dc_inventory() {
+  const domainMap = _currentDomainMap ?? new Map();
+  const domains = [...domainMap.values()].map(entry => ({
+    domain: entry.organization || entry.domain,
+    organization: entry.organization ?? null,
+    category: entry.category ?? null,
+    exposures: combinedExposuresForEntry(entry, sessionCookies),
+  }));
+  const policy = _policyIntel ?? null;
+  // Same load baseline buildJourney() uses — the first captured request, not
+  // session.startedAt, which comes from a different clock source.
+  const { t0, settleMs } = computeSettlePoint((_currentSession?.requests ?? []).map(r => r.timestamp));
+  return buildDataInventory({
+    domains,
+    policyFindings: policy?.findings ?? [],
+    policyDocsRead: (policy?.documents ?? []).filter(d => d.ok !== false).length,
+    t0, settleMs,
+  });
+}
+
+function renderDataCollected() {
+  const el = document.getElementById('data-inner');
+  if (!el) return;
+  if (!_currentSession) {
+    el.innerHTML = `<div class="dc-main"><p class="ov-empty">This is where Observa lists the data types it saw leaving a page, and whether the site's own policy mentions each one.<br/><br/>Browse to any site with Observa running, then come back.</p></div>`;
+    return;
+  }
+
+  const { rows, counts } = dc_inventory();
+  const policyRead = (_policyIntel?.documents ?? []).filter(d => d.ok !== false).length > 0;
+  const visible = rows.filter(r => dc_matchesFilter(r, _dcFilter));
+
+  // A filter that matches nothing is not a choice, it is clutter — on a page
+  // with one finding the screen showed five chips, three of them zero. "All"
+  // always shows, and so does whichever filter is active, so selecting one can
+  // never strand the user on a control that has vanished.
+  const chip = (id, label, n, dotClass) =>
+    (n > 0 || id === 'all' || _dcFilter === id)
+      ? `<button type="button" class="dc-chip${_dcFilter === id ? ' active' : ''}" data-filter="${id}">
+       ${dotClass ? `<span class="dc-chip-dot ${dotClass}"></span>` : ''}${esc(label)}<span class="dc-chip-n">${n}</span>
+     </button>`
+      : '';
+
+  const tableHtml = visible.length ? `
+    <table class="dc-table">
+      <thead><tr>
+        <th>Data type</th><th>Source</th><th>Shared with</th><th>When</th><th>Risk</th>
+      </tr></thead>
+      <tbody>
+        ${visible.map(r => `
+          <tr class="dc-row${_dcSelected === r.type ? ' selected' : ''}" data-type="${esc(r.type)}">
+            <td>
+              <div class="dc-type">
+                <span class="dc-type-ico">${icon(dc_icon(r),{size:13})}</span>
+                <span style="min-width:0">
+                  <span class="dc-type-name">${esc(r.label)}</span>
+                  ${dc_badges(r)}
+                  ${dc_rowMeaning(r)}
+                </span>
+              </div>
+            </td>
+            <td>${esc(r.sources.join(', '))}</td>
+            <td>${r.sharedWith.length
+                  ? esc(r.sharedWith.slice(0,2).map(x => x.organization || x.domain).join(', ')) +
+                    (r.sharedWith.length > 2 ? `<div class="dc-sub">+${r.sharedWith.length - 2} more</div>` : '')
+                  : '<span style="color:var(--muted)">—</span>'}</td>
+            <td>${dc_whenCell(r)}</td>
+            <td><span class="dc-risk dc-risk-${esc(r.risk)}">${esc(r.risk[0].toUpperCase()+r.risk.slice(1))}</span></td>
+          </tr>`).join('')}
+      </tbody>
+    </table>` : `<p class="ov-empty">No data types match this filter. ${_dcFilter === 'undisclosed' ? 'That is the good outcome here \u2014 everything observed was mentioned somewhere in the policy.' : 'Try <strong>All</strong> to see everything Observa found.'}</p>`;
+
+  el.innerHTML = `
+    <div class="dc-main">
+      <div class="dc-head">
+        <h1>Data Collected</h1>
+        <p>What this page was seen sending, and whether the site's own policy mentions that category. Everything marked <em>Observed</em> is something Observa actually watched leave the page.</p>
+      </div>
+      <div class="dc-filters">
+        ${chip('all', 'All', counts.all, '')}
+        ${chip('observed', 'Observed', counts.observed, 'dc-dot-observed')}
+        ${chip('policy', 'Policy only', counts.policyOnly, 'dc-dot-policy')}
+        ${chip('undisclosed', 'Not disclosed', counts.notDisclosed, 'dc-dot-undisclosed')}
+        ${chip('sensitive', 'Sensitive', counts.sensitive, 'dc-dot-sensitive')}
+        ${counts.afterLoad ? chip('after', 'After the page settled', counts.afterLoad, 'dc-dot-after') : ''}
+      </div>
+      ${tableHtml}
+      ${!policyRead ? `<div class="dc-note">${icon('info',{size:11})} ${esc(dc_noPolicyTitle(_policyIntel))} \u2014 ${esc(dc_noPolicyBody(_policyIntel))}</div>` : ''}
+      <div class="dc-note">A pattern match means something <em>shaped like</em> this was present — not proof the value is real, accurate, or yours. Select a row for the exact evidence.</div>
+    </div>
+    <aside class="dc-detail" id="dc-detail">${renderDataDetail(rows.find(r => r.type === _dcSelected))}</aside>
+  `;
+}
+
+// Why this matters more than it looks: an automated scanner loads a URL and
+// leaves, so it only ever sees the load burst. A value that appears *after* the
+// page settled is the part of the picture only a real session can show. The
+// caveat is mandatory — Observa cannot see the interaction itself.
+function dc_timingBlock(row) {
+  const t = row.timing ?? {};
+  if (t.phase === 'unknown') return '';
+  if (t.phase === 'load') {
+    return `<div class="dc-d-sec">
+      <div class="dc-d-sec-label">When it happened</div>
+      <div class="dc-d-text">Sent while the page was still loading (${esc(formatElapsed(t.elapsedMs))} in). That points to something the page does on every visit, rather than a response to anything you did.</div>
+    </div>`;
+  }
+  return `<div class="dc-callout dc-callout-warn">${icon('clock',{size:13})}<span>
+    <span class="dc-callout-title">Sent ${esc(formatElapsed(t.elapsedMs))} in — after the page settled</span>
+    This did not fire as part of the initial page load. ${esc(LATER_CAVEAT)}</span></div>`;
+}
+
+function renderDataDetail(row) {
+  if (!row) {
+    return `<div class="dc-d-empty">${icon('table',{size:30})}<span>Pick a row to see the evidence</span>
+      <div style="font-size:var(--fs-xs);line-height:1.55">Every row opens the actual request it was found in, which companies received it, when it was sent, and the policy language that covers it \u2014 or the fact that none does.</div></div>`;
+  }
+
+  const ev = row.evidence;
+  // The evidence block shows the real request, with the matched value marked.
+  // Redacted by default, exact value behind an explicit click — the same
+  // redact-by-default/reveal-on-demand rule the detail panel already follows.
+  let evidenceHtml = '';
+  if (ev) {
+    const shown = _dcRevealed ? (ev.raw ?? ev.redacted) : ev.redacted;
+    evidenceHtml = `
+      <div class="dc-d-sec">
+        <div class="dc-d-sec-label">Observed evidence</div>
+        <div class="dc-code">${esc(ev.domain)}<br/>${esc(ev.paramName ?? 'value')}=<mark>${esc(shown ?? '')}</mark></div>
+        ${ev.raw && ev.raw !== ev.redacted
+          ? `<button type="button" class="dc-reveal" id="dcReveal">${_dcRevealed ? 'Hide exact value' : 'Show exact value'}</button>`
+          : ''}
+        <div class="dc-kv"><span class="dc-kv-k">Found in</span><span class="dc-kv-v">${esc(row.sources.join(', '))}</span></div>
+        <div class="dc-kv"><span class="dc-kv-k">Parameter</span><span class="dc-kv-v">${esc(ev.paramName ?? '—')}</span></div>
+        <div class="dc-kv"><span class="dc-kv-k">Occurrences</span><span class="dc-kv-v">${row.occurrences}</span></div>
+        <div class="dc-kv"><span class="dc-kv-k">Confidence</span><span class="dc-kv-v">${esc(row.confidence[0].toUpperCase()+row.confidence.slice(1))}</span></div>
+        <div class="dc-kv"><span class="dc-kv-k">Provenance</span><span class="dc-kv-v">${esc(ev.provenance ?? 'Observed')}</span></div>
+      </div>
+      ${dc_timingBlock(row)}`;
+  }
+
+  // The join, stated per data type.
+  let policyHtml;
+  // (timing block is rendered by dc_timingBlock above)
+  if (!row.disclosureKnown) {
+    policyHtml = `<div class="dc-callout dc-callout-info">${icon('info',{size:13})}<span>
+      <span class="dc-callout-title">${esc(dc_noPolicyTitle(_policyIntel))}</span>
+      ${esc(dc_noPolicyBody(_policyIntel))}</span></div>`;
+  } else if (row.disclosed && row.policy) {
+    policyHtml = `<div class="dc-callout dc-callout-info">${icon('check-circle',{size:13})}<span>
+      <span class="dc-callout-title">Mentioned in the policy</span>
+      ${esc(row.policy.sourceDocument)}${row.policy.section ? ` · ${esc(row.policy.section)}` : ''} says:
+      <em>“${esc(row.policy.evidence)}”</em></span></div>`;
+  } else {
+    policyHtml = `<div class="dc-callout dc-callout-warn">${icon('alert-triangle',{size:13})}<span>
+      <span class="dc-callout-title">Not found in the privacy policy</span>
+      Observa's patterns found no language about ${esc(row.categoryLabel ?? 'this category')} in the documents it read. That is a limit of this scanner, not a finding that the policy is silent — a policy wording it unusually, or a document we didn't discover, would look the same.</span></div>`;
+  }
+
+  const sharedHtml = row.sharedWith.length ? `
+    <div class="dc-d-sec">
+      <div class="dc-d-sec-label">Shared with</div>
+      ${row.sharedWith.map(x => `<div class="dc-shared">${icon('users',{size:12})}<span>${esc(x.organization || x.domain)}</span>
+        ${x.category ? `<span class="dc-shared-cat">${esc(x.category)}</span>` : ''}</div>`).join('')}
+    </div>` : '';
+
+  return `
+    <div class="dc-d-head">
+      <span class="dc-type-ico">${icon(dc_icon(row),{size:14})}</span>
+      <span class="dc-d-title">${esc(row.label)}</span>
+      <button type="button" class="dc-d-close" id="dcClose">${icon('x',{size:15})}</button>
+    </div>
+    ${dc_badges(row)}
+    ${policyHtml}
+    ${evidenceHtml}
+    ${sharedHtml}
+  `;
+}
+
+document.getElementById('data-inner')?.addEventListener('click', e => {
+  const chip = e.target.closest('[data-filter]');
+  if (chip) { _dcFilter = chip.dataset.filter; renderDataCollected(); return; }
+
+  const reveal = e.target.closest('#dcReveal');
+  if (reveal) { _dcRevealed = !_dcRevealed; renderDataCollected(); return; }
+
+  const close = e.target.closest('#dcClose');
+  if (close) { _dcSelected = null; _dcRevealed = false; renderDataCollected(); return; }
+
+  const row = e.target.closest('.dc-row');
+  if (row) {
+    _dcSelected = _dcSelected === row.dataset.type ? null : row.dataset.type;
+    _dcRevealed = false;
+    renderDataCollected();
+  }
+});
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 await applyStoredTheme();
 updateThemeButtonIcon();
-document.getElementById('btnInsights').innerHTML = `${icon('alert-triangle',{size:13})} Insights`;
 document.getElementById('btnReplay').innerHTML = `${icon('zap',{size:12})} Replay`;
-document.getElementById('btnSettings').innerHTML = icon('settings',{size:13});
+
+// Sidebar icons. Set here rather than inline in the HTML so they come from the
+// one shared icon set (ui/icons.js) like every other piece of chrome.
+const SIDEBAR_ICONS = { overview: 'layers', data: 'table', graph: 'network', orgs: 'building', policy: 'shield-check' };
+for (const [view, name] of Object.entries(SIDEBAR_ICONS)) {
+  const host = document.querySelector(`.snav[data-view="${view}"] .snav-ico`);
+  if (host) host.innerHTML = icon(name, { size: 15 });
+}
+document.querySelector('#btnSettings .snav-ico').innerHTML = icon('settings', { size: 14 });
 try {
-  weblensSettings = await chrome.runtime.sendMessage({ type: 'weblens:getSettings' }) ?? weblensSettings;
+  observaSettings = await chrome.runtime.sendMessage({ type: 'observa:getSettings' }) ?? observaSettings;
 } catch { /* defaults already off */ }
 allSessions = await loadAllSessions();
 if (!allSessions.length) {
   document.getElementById('sessionSelect').innerHTML = '<option>No sessions — visit a page first</option>';
-  document.getElementById('cy').innerHTML = '<p class="empty-msg">No data. Visit a page then reopen.</p>';
+  document.getElementById('captureStatus').textContent = 'Open a page and select Refresh view';
+  document.getElementById('cy').innerHTML = '<p class="empty-msg">No requests captured for this page yet.<br/>Reload it with Observa running and the map will fill in.</p>';
 } else {
   populateSessions(allSessions);
   const best = allSessions.find(s=>s.session.requests?.length>0) ?? allSessions[0];
   document.getElementById('sessionSelect').value = allSessions.indexOf(best);
   await loadSession(best.session);
 }
+switchView('overview');

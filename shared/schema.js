@@ -1,4 +1,4 @@
-// WebLens shared schema — M2.
+// Observa shared schema — M2.
 
 /**
  * @typedef {Object} CapturedRequest
@@ -77,7 +77,7 @@ export function hostnameFromUrl(url) {
 
 /**
  * True when a request's net-error indicates it was cancelled by an
- * extension's blocking rule (WebLens's own M6 block, or another blocker
+ * extension's blocking rule (Observa's own M6 block, or another blocker
  * like an ad blocker) rather than a genuine network failure (DNS, timeout,
  * connection reset, etc). This is Chrome's actual net-error string, not a
  * guess — Observed, not Inferred. It cannot say WHICH extension blocked it,

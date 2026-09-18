@@ -1,4 +1,4 @@
-/* WebLens shared design tokens — used by both popup and dashboard so they
+/* Observa shared design tokens — used by both popup and dashboard so they
    read as one product instead of two.
 
    v0.13.0 "Field Report" redesign: the light theme is now a warm,
@@ -15,22 +15,22 @@
 
 :root {
   /* ── Structural chrome — flips between themes ─────────────────────────── */
-  --bg:       #17181b;
-  --surface1: #1d1e22;   /* topbar, cards, popup body panels */
-  --surface2: #24252a;   /* secondary fill, hover rows */
-  --surface3: #2c2d33;   /* tertiary fill, badge backgrounds */
-  --border:   rgba(237,238,242,.08);
-  --border2:  rgba(237,238,242,.14);
-  --border3:  rgba(237,238,242,.24);
-  --text:     #ececee;
-  --text2:    #b7b7bd;
-  --muted:    rgba(236,236,238,.42);
-  --muted2:   rgba(236,236,238,.62);
-  --accent:   #d97a4a;
-  --accent2:  #e89568;
-  --text-rgb: 236,236,238;
-  --shadow:   0 1px 4px rgba(0,0,0,.35), 0 4px 20px rgba(0,0,0,.28);
-  --shadow2:  0 2px 14px rgba(0,0,0,.4), 0 10px 36px rgba(0,0,0,.32);
+  --bg:        #0b0f17;
+  --surface1:  #111722;   /* topbar, cards, popup body panels */
+  --surface2:  #18202e;   /* secondary fill, hover rows */
+  --surface3:  #212b3b;   /* tertiary fill, badge backgrounds */
+  --border:    rgba(214,228,248,.07);
+  --border2:   rgba(214,228,248,.13);
+  --border3:   rgba(214,228,248,.22);
+  --text:      #e6edf8;
+  --text2:     #aab8cd;
+  --muted:     rgba(230,237,248,.68);
+  --muted2:    rgba(230,237,248,.8);
+  --accent:    #3d9bff;
+  --accent2:   #6bb4ff;
+  --text-rgb:  230,237,248;
+  --shadow:   0 1px 3px rgba(2,8,20,.5), 0 6px 22px rgba(2,8,20,.42);
+  --shadow2:  0 2px 16px rgba(2,8,20,.55), 0 14px 44px rgba(2,8,20,.45);
 
   /* ── Typography — "Field Report" pairing: a serif display face for
      headlines/emphasis (Google Fonts "Newsreader") and a clean sans body
@@ -45,6 +45,17 @@
   --font-serif: 'Newsreader', Georgia, 'Iowan Old Style', 'Times New Roman', serif;
   --font-sans:  'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 
+  /* ── Type scale (v0.21.0) ──────────────────────────────────────────────
+     The dashboard had grown 21 distinct font sizes, which is what made it read
+     as busy even when the content was fine. Four text sizes plus one
+     special-purpose eyebrow now cover every use. Icon glyph sizes are NOT part
+     of this scale — an emoji at 36px is an illustration, not type. */
+  --fs-eyebrow: 11px;
+  --fs-xs:      12px;
+  --fs-sm:      14px;
+  --fs-md:      16px;   /* card and section titles, serif headlines */
+  --fs-lg:      25px;   /* page titles, display numbers */
+
   /* ── Radii / spacing — one scale for both surfaces ─────────────────────── */
   --radius-sm: 6px;
   --radius-md: 9px;
@@ -57,7 +68,7 @@
      Deliberately UNCHANGED by the Field Report pass — these are the graph
      node / badge category colors the redesign was explicitly asked to
      reuse as-is, not replace with new hex values. ────────────────────── */
-  --accent-rgb:      217,122,74;   /* brand accent — terracotta (was blue) */
+  --accent-rgb: 61,155,255;   /* brand accent — blue (Observa overview redesign) */
   --danger-rgb:      248,113,113;  /* blocked / high severity / cryptomining */
   --danger-strong-rgb: 239,68,68;  /* solid danger fills (e.g. destructive button) */
   --warning-rgb:     251,146,60;   /* advertising / medium severity / caveats */
@@ -73,21 +84,21 @@
 /* System preference drives it when the user hasn't chosen explicitly */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --bg:       #faf7f2;
-    --surface1: #fffdf9;
-    --surface2: #f4efe6;
-    --surface3: #ece4d6;
-    --border:   rgba(42,38,33,.09);
-    --border2:  rgba(42,38,33,.15);
-    --border3:  rgba(42,38,33,.26);
-    --text:     #2a2621;
-    --text2:    #55504a;
-    --muted:    rgba(42,38,33,.45);
-    --muted2:   rgba(42,38,33,.66);
-    --accent:   #a8501f;
-    --accent2:  #8a3f17;
-    --accent-rgb: 168,80,31;
-    --text-rgb: 42,38,33;
+    --bg:        #f4f7fb;
+    --surface1:  #ffffff;
+    --surface2:  #eef3f9;
+    --surface3:  #e2eaf4;
+    --border:    rgba(16,34,58,.08);
+    --border2:   rgba(16,34,58,.14);
+    --border3:   rgba(16,34,58,.24);
+    --text:      #10223a;
+    --text2:     #3d5470;
+    --muted:     rgba(16,34,58,.72);
+    --muted2:    rgba(16,34,58,.82);
+    --accent:    #1567d3;
+    --accent2:   #0d4fa8;
+    --accent-rgb: 21,103,211;
+    --text-rgb:  16,34,58;
     --shadow:   0 1px 4px rgba(42,38,33,.06), 0 4px 20px rgba(42,38,33,.05);
     --shadow2:  0 2px 12px rgba(42,38,33,.08), 0 8px 32px rgba(42,38,33,.07);
   }
@@ -95,54 +106,54 @@
 
 /* Explicit user choice always wins over system preference */
 :root[data-theme="light"] {
-  --bg:       #faf7f2;
-  --surface1: #fffdf9;
-  --surface2: #f4efe6;
-  --surface3: #ece4d6;
-  --border:   rgba(42,38,33,.09);
-  --border2:  rgba(42,38,33,.15);
-  --border3:  rgba(42,38,33,.26);
-  --text:     #2a2621;
-  --text2:    #55504a;
-  --muted:    rgba(42,38,33,.45);
-  --muted2:   rgba(42,38,33,.66);
-  --accent:   #a8501f;
-  --accent2:  #8a3f17;
-  --accent-rgb: 168,80,31;
-  --text-rgb: 42,38,33;
+  --bg:        #f4f7fb;
+  --surface1:  #ffffff;
+  --surface2:  #eef3f9;
+  --surface3:  #e2eaf4;
+  --border:    rgba(16,34,58,.08);
+  --border2:   rgba(16,34,58,.14);
+  --border3:   rgba(16,34,58,.24);
+  --text:      #10223a;
+  --text2:     #3d5470;
+  --muted:     rgba(16,34,58,.72);
+  --muted2:    rgba(16,34,58,.82);
+  --accent:    #1567d3;
+  --accent2:   #0d4fa8;
+  --accent-rgb: 21,103,211;
+  --text-rgb:  16,34,58;
   --shadow:   0 1px 4px rgba(42,38,33,.06), 0 4px 20px rgba(42,38,33,.05);
   --shadow2:  0 2px 12px rgba(42,38,33,.08), 0 8px 32px rgba(42,38,33,.07);
 }
 
 :root[data-theme="dark"] {
-  --bg:       #17181b;
-  --surface1: #1d1e22;
-  --surface2: #24252a;
-  --surface3: #2c2d33;
-  --border:   rgba(237,238,242,.08);
-  --border2:  rgba(237,238,242,.14);
-  --border3:  rgba(237,238,242,.24);
-  --text:     #ececee;
-  --text2:    #b7b7bd;
-  --muted:    rgba(236,236,238,.42);
-  --muted2:   rgba(236,236,238,.62);
-  --accent:   #d97a4a;
-  --accent2:  #e89568;
-  --accent-rgb: 217,122,74;
-  --text-rgb: 236,236,238;
-  --shadow:   0 1px 4px rgba(0,0,0,.35), 0 4px 20px rgba(0,0,0,.28);
-  --shadow2:  0 2px 14px rgba(0,0,0,.4), 0 10px 36px rgba(0,0,0,.32);
+  --bg:        #0b0f17;
+  --surface1:  #111722;
+  --surface2:  #18202e;
+  --surface3:  #212b3b;
+  --border:    rgba(214,228,248,.07);
+  --border2:   rgba(214,228,248,.13);
+  --border3:   rgba(214,228,248,.22);
+  --text:      #e6edf8;
+  --text2:     #aab8cd;
+  --muted:     rgba(230,237,248,.68);
+  --muted2:    rgba(230,237,248,.8);
+  --accent:    #3d9bff;
+  --accent2:   #6bb4ff;
+  --accent-rgb: 61,155,255;
+  --text-rgb:  230,237,248;
+  --shadow:   0 1px 3px rgba(2,8,20,.5), 0 6px 22px rgba(2,8,20,.42);
+  --shadow2:  0 2px 16px rgba(2,8,20,.55), 0 14px 44px rgba(2,8,20,.45);
 }
 
 .wl-icon { flex-shrink: 0; vertical-align: -2px; display: inline-block; }
 
 /* ── Skeleton loading shimmer — shared by popup + dashboard ──────────────── */
-@keyframes weblensShimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
+@keyframes observaShimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
 .skel {
   display: inline-block;
   border-radius: var(--radius-sm);
   background: linear-gradient(90deg, var(--surface2) 0%, var(--surface3) 50%, var(--surface2) 100%);
   background-size: 200px 100%;
-  animation: weblensShimmer 1.3s ease-in-out infinite;
+  animation: observaShimmer 1.3s ease-in-out infinite;
   color: transparent !important;
 }

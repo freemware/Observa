@@ -1,8 +1,8 @@
-// WebLens site-scoped blocking — background/blocking.js — M6 (Verify & Protect).
+// Observa site-scoped blocking — background/blocking.js — M6 (Verify & Protect).
 //
-// This is WebLens's first active intervention — everything before this
+// This is Observa's first active intervention — everything before this
 // module only observed. It exists solely as the mechanism behind an
-// explicit user click ("Block this on this site"): WebLens never blocks
+// explicit user click ("Block this on this site"): Observa never blocks
 // proactively or based on classification alone, and never blocks anything
 // the user didn't ask it to.
 //
@@ -11,12 +11,12 @@
 // is on) so a block only applies to that one site — blocking a tracker
 // here never affects it on other sites. Chrome persists dynamic rules
 // across restarts on its own; the small index kept here just maps
-// (site, tracker domain) -> rule id so WebLens can look up and toggle them.
+// (site, tracker domain) -> rule id so Observa can look up and toggle them.
 
-const RULES_INDEX_KEY = 'weblens:blockRules'; // { [siteEtld1]: { [trackerDomain]: ruleId } }
-const NEXT_ID_KEY = 'weblens:nextRuleId';
+const RULES_INDEX_KEY = 'observa:blockRules'; // { [siteEtld1]: { [trackerDomain]: ruleId } }
+const NEXT_ID_KEY = 'observa:nextRuleId';
 
-// Deliberately excludes 'main_frame' — WebLens must never block a top-level
+// Deliberately excludes 'main_frame' — Observa must never block a top-level
 // navigation, only resources a page pulls in from the tracker.
 const BLOCK_RESOURCE_TYPES = [
   'script', 'xmlhttprequest', 'image', 'stylesheet', 'font',
@@ -83,7 +83,7 @@ export async function blockDomainOnSite(siteEtld1, trackerDomain) {
 
 /**
  * Unblock — the inverse of blockDomainOnSite, and the only "restore"
- * mechanism WebLens offers. There's no separate restore flow: blocking is
+ * mechanism Observa offers. There's no separate restore flow: blocking is
  * a toggle, and toggling it off is the undo.
  */
 export async function unblockDomainOnSite(siteEtld1, trackerDomain) {
@@ -101,7 +101,7 @@ export async function unblockDomainOnSite(siteEtld1, trackerDomain) {
   await _setIndex(idx);
 }
 
-/** Removes every WebLens block, on every site. Used by "Clear all WebLens data". */
+/** Removes every Observa block, on every site. Used by "Clear all Observa data". */
 export async function clearAllBlocks() {
   const idx = await _getIndex();
   const allIds = Object.values(idx).flatMap(m => Object.values(m));
