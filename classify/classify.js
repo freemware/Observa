@@ -1,4 +1,4 @@
-// WebLens classifier — classify/classify.js — M3 refinement.
+// Observa classifier — classify/classify.js — M3 refinement.
 //
 // eTLD+1 strategy:
 //   1. Use chrome.publicSuffix.getDomain() if available (Chrome 130+, exact version TBD).

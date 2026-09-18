@@ -1,4 +1,4 @@
-// WebLens tracker list — classify/tracker-list.js
+// Observa tracker list — classify/tracker-list.js
 //
 // Generated from the Disconnect Tracking Protection Services list.
 // Source: https://github.com/disconnectme/disconnect-tracking-protection
@@ -4047,8 +4047,8 @@ let _live = null;
  * refresh, so new data takes effect without waiting for a worker restart. */
 export async function loadLiveTrackerOverlay() {
   try {
-    const stored = await chrome.storage.local.get('weblens:liveTrackerList');
-    _live = stored['weblens:liveTrackerList'] ?? null;
+    const stored = await chrome.storage.local.get('observa:liveTrackerList');
+    _live = stored['observa:liveTrackerList'] ?? null;
   } catch { _live = null; }
 }
 

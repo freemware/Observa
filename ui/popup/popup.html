@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>WebLens</title>
+    <title>Observa</title>
     <link rel="stylesheet" href="../theme.css"/>
     <!-- Same "Field Report" font pairing as the dashboard (v0.13.0) — see
          dashboard.html for the CSP/offline-fallback note; --font-serif and
@@ -11,7 +11,7 @@
     <style>
       *, *::before, *::after { box-sizing: border-box; }
       body {
-        width: 380px; margin: 0; padding: 0;
+        width: 400px; margin: 0; padding: 0;
         font: 13px/1.5 var(--font-sans);
         background: var(--bg); color: var(--text);
       }
@@ -44,7 +44,7 @@
       }
       .btn-icon:hover { background: var(--surface3); color: var(--text); }
       .btn-dashboard {
-        font-size: 11px; padding: 4px 10px; border-radius: var(--radius-sm);
+        font-size: 12px; padding: 4px 10px; border-radius: var(--radius-sm);
         border: 1px solid var(--border2); background: rgba(var(--accent-rgb),.12);
         color: var(--accent2); cursor: pointer; font-weight: 600;
         transition: all .15s; display: inline-flex; align-items: center; gap: 5px;
@@ -56,11 +56,22 @@
         margin: 0; padding: 6px 14px;
         background: var(--surface2);
         border-bottom: 1px solid var(--border);
-        font-size: 11px; color: var(--muted);
+        font-size: 12px; color: var(--muted);
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
 
       /* Quick summary strip */
+      .pv { padding: 11px 12px 12px; border-bottom: 1px solid var(--border); }
+      .pv-row { display: flex; align-items: center; gap: 6px; }
+      .pv-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: rgb(var(--success-rgb)); }
+      .pv.caution  .pv-dot { background: rgb(var(--warning-rgb)); }
+      .pv.concern  .pv-dot { background: rgb(var(--danger-rgb)); }
+      .pv-label {
+        font-size: 11px; font-weight: 700; letter-spacing: .07em;
+        text-transform: uppercase; color: var(--muted);
+      }
+      .pv-head { font-size: 13px; font-weight: 650; line-height: 1.35; margin-top: 4px; color: var(--text); }
+      .pv-why { font-size: 12px; line-height: 1.5; color: var(--muted); margin-top: 3px; }
       .summary-strip {
         display: grid; grid-template-columns: repeat(4,1fr);
         gap: 0; border-bottom: 1px solid var(--border);
@@ -74,7 +85,7 @@
       .sum-n.warn  { color: rgb(var(--warning-rgb)); }
       .sum-n.danger{ color: rgb(var(--danger-rgb)); }
       .sum-n.skel  { width: 28px; height: 18px; margin: 0 auto; }
-      .sum-l { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
+      .sum-l { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
 
       /* Tabs */
       .tabs {
@@ -82,7 +93,7 @@
         padding: 0 14px; gap: 2px; background: var(--surface1);
       }
       .tab {
-        padding: 7px 10px 8px; font-size: 11px; font-weight: 600;
+        padding: 7px 10px 8px; font-size: 12px; font-weight: 600;
         cursor: pointer; border: none; background: none; color: var(--muted);
         border-bottom: 2px solid transparent; margin-bottom: -1px;
         transition: all .15s; display: inline-flex; align-items: center; gap: 5px;
@@ -93,11 +104,17 @@
       .panel { display: none; }
       .panel.active { display: block; }
 
+      .popup-action { padding: 9px 14px 11px; border-bottom:1px solid var(--border); }
+      .popup-action .btn-dashboard { width:100%; justify-content:center; padding:8px 10px; font-size:12px; }
+      .popup-note { padding:2px 14px 10px;color:var(--muted2);font-size:12px; }
+      .more-insights { display:block;width:100%;text-align:left;padding:10px 14px;border:0;border-top:1px solid var(--border);background:var(--surface1);color:var(--accent2);font:600 12px var(--font-sans);cursor:pointer; }
+      .more-insights:hover { background:var(--surface2); }
+      #extraInsights[hidden] { display:none; }
       /* Findings banner */
       /* Banner severity levels */
       .findings-banner {
         margin: 8px 12px 0; padding: 9px 12px;
-        border-radius: var(--radius-md); font-size: 11px;
+        border-radius: var(--radius-md); font-size: 12px;
       }
       .findings-banner.sev-red {
         background: rgba(var(--danger-rgb),.08); border: 1px solid rgba(var(--danger-rgb),.3); color: rgb(var(--danger-rgb));
@@ -109,11 +126,11 @@
         background: rgba(var(--success-rgb),.06); border: 1px solid rgba(var(--success-rgb),.2); color: rgb(var(--success-rgb));
       }
       .findings-banner-title { font-weight: 700; margin-bottom: 3px; display: flex; align-items: center; gap: 5px; }
-      .findings-banner-sub { font-size: 10px; opacity: .75; line-height: 1.5; margin-top: 3px; }
+      .findings-banner-sub { font-size: 12px; opacity: .75; line-height: 1.5; margin-top: 3px; }
 
       /* Section title */
       .section-title {
-        font-size: 9px; font-weight: 700; text-transform: uppercase;
+        font-size: 12px; font-weight: 700; text-transform: uppercase;
         letter-spacing: .08em; color: var(--muted);
         padding: 10px 14px 5px; margin: 0;
       }
@@ -127,12 +144,12 @@
       }
       .domain-item:last-child { border-bottom: none; }
       .domain-name { font-family: monospace; word-break: break-all; min-width: 0; }
-      .domain-org  { opacity: .45; font-size: 10px; }
-      .count { opacity: .3; font-size: 11px; }
+      .domain-org  { opacity: .82; font-size: 12px; }
+      .count { opacity: .82; font-size: 12px; }
 
       /* Badges */
       .badge {
-        font-size: 9px; padding: 2px 6px; border-radius: 10px;
+        font-size: 12px; padding: 2px 6px; border-radius: 10px;
         white-space: nowrap; font-weight: 700; flex-shrink: 0;
       }
       .badge-Advertising   { background:rgba(var(--warning-rgb),.15); color:rgb(var(--warning-rgb)); }
@@ -156,16 +173,16 @@
       }
       .cstat .cv { font-size: 17px; font-weight: 700; line-height: 1; color: var(--text); }
       .cstat .cv.skel { width: 24px; height: 16px; }
-      .cstat .cl { font-size: 9px; color: var(--muted); margin-top: 2px; }
+      .cstat .cl { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
       .cookie-list { max-height: 185px; overflow-y: auto; padding: 0 12px; }
       .cookie-row { padding: 6px 0; border-bottom: 1px solid var(--border); }
       .cookie-row:last-child { border-bottom: none; }
       .cookie-top { display: flex; align-items: baseline; gap: 6px; }
       .cookie-name { font-family: monospace; font-size: 12px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-      .cookie-domain-label { opacity: .38; font-size: 10px; flex-shrink: 0; }
+      .cookie-domain-label { opacity: .82; font-size: 12px; flex-shrink: 0; }
       .cookie-flags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
-      .flag { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: var(--surface3); color: var(--muted2); }
+      .flag { font-size: 12px; padding: 1px 5px; border-radius: 3px; background: var(--surface3); color: var(--muted2); }
       /* Flag color system — calibrated severity */
       .flag-good     { background: rgba(var(--success-rgb),.12);  color: rgb(var(--success-rgb)); }  /* protective: Secure, HttpOnly, SameSite=Strict */
       .flag-neutral  { background: rgba(var(--info-rgb),.11); color: rgb(var(--info-rgb)); }  /* neutral observed property */
@@ -174,7 +191,7 @@
       .flag-warn     { background: rgba(var(--danger-rgb),.12);  color: rgb(var(--danger-rgb)); }  /* confirmed bad — reserved */
       .flag-info     { background: rgba(var(--info-rgb),.11); color: rgb(var(--info-rgb)); }  /* kept for compat */
       .flag-session  { background: rgba(var(--slate-rgb),.12);color: rgb(var(--slate-rgb)); }  /* session / temporary */
-      .expiry { opacity: .38; font-size: 10px; margin-top: 2px; }
+      .expiry { opacity: .82; font-size: 12px; margin-top: 2px; }
 
       /* Protect tab */
       .protect-list { padding: 6px 12px 10px; display: flex; flex-direction: column; gap: 7px; }
@@ -185,7 +202,7 @@
       }
       .protect-icon { flex-shrink: 0; line-height: 1.2; color: var(--text2); }
       .protect-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
-      .protect-desc  { font-size: 10px; color: var(--muted2); line-height: 1.55; }
+      .protect-desc  { font-size: 12px; color: var(--muted2); line-height: 1.55; }
 
       /* Footer */
       .footer {
@@ -196,16 +213,16 @@
         gap: 8px;
       }
       .footer-text { flex: 1; min-width: 0; }
-      .notice { font-size: 9px; color: var(--muted); margin: 0; line-height: 1.4; }
-      .credit { font-size: 8.5px; color: var(--muted); opacity: .55; margin: 2px 0 0; }
+      .notice { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.4; }
+      .credit { font-size: 11px; color: var(--muted); opacity: .55; margin: 2px 0 0; }
       .btn-clear {
-        font-size: 11px; padding: 4px 9px; border-radius: var(--radius-sm);
+        font-size: 12px; padding: 4px 9px; border-radius: var(--radius-sm);
         border: 1px solid var(--border2); background: none;
         color: var(--muted); cursor: pointer; white-space: nowrap;
         transition: all .15s;
       }
       .btn-clear:hover { color: var(--text); border-color: var(--border3); }
-      #error { color: rgb(var(--danger-rgb)); font-size: 11px; margin: 8px 14px 0; }
+      #error { color: rgb(var(--danger-rgb)); font-size: 12px; margin: 8px 14px 0; }
 
       /* Cookie see-more expand */
       /* Cookie expand */
@@ -254,14 +271,11 @@
               <stop offset="100%" stop-color="rgb(var(--fingerprint-rgb))"/>
             </linearGradient>
           </defs>
-          <circle cx="10" cy="10" r="7" stroke="url(#logoGrad)" stroke-width="2"/>
-          <line x1="15" y1="15" x2="21" y2="21" stroke="url(#logoGrad)" stroke-width="2" stroke-linecap="round"/>
-          <path d="M7 8 12 7 9 13 7 8 12 7" stroke="url(#logoGrad)" stroke-width="1" stroke-linejoin="round" opacity=".55"/>
-          <circle cx="7" cy="8" r="1.3" fill="url(#logoGrad)"/>
-          <circle cx="12" cy="7" r="1.3" fill="url(#logoGrad)"/>
-          <circle cx="9" cy="13" r="1.3" fill="url(#logoGrad)"/>
+          <path d="M4 12q8-9.8 16 0 -8 9.8-16 0Z" stroke="url(#logoGrad)" stroke-width="2" stroke-linejoin="round"/>
+          <circle cx="12" cy="12" r="3.8" stroke="url(#logoGrad)" stroke-width="1.7"/>
+          <circle cx="12" cy="12" r="1.6" fill="url(#logoGrad)"/>
         </svg>
-        <span class="logo">WebLens</span>
+        <span class="logo">Observa</span>
       </div>
       <div class="header-actions">
         <button class="btn-icon" id="btnTheme" title="Theme"></button>
@@ -270,9 +284,22 @@
     </div>
     <p class="pageurl" id="pageUrl">Loading…</p>
 
+    <!-- The one-sentence answer, above the numbers. Four bare counts left the
+         user to judge whether "3 third parties" was bad; this says so. -->
+    <div class="pv" id="popupVerdict" hidden>
+      <div class="pv-row">
+        <span class="pv-dot" id="pvDot"></span>
+        <span class="pv-label" id="pvLabel"></span>
+      </div>
+      <div class="pv-head" id="pvHead"></div>
+      <div class="pv-why" id="pvWhy"></div>
+    </div>
+
+    <div class="popup-action"><button type="button" id="btnTopAction" class="btn-dashboard">Inspect evidence in dashboard →</button></div>
+
     <div class="summary-strip">
       <div class="sum-cell"><div class="sum-n skel" id="totalRequests">&nbsp;</div><div class="sum-l">Requests</div></div>
-      <div class="sum-cell"><div class="sum-n skel" id="totalDomains">&nbsp;</div><div class="sum-l">Domains</div></div>
+      <div class="sum-cell"><div class="sum-n skel" id="totalDomains">&nbsp;</div><div class="sum-l" id="domainsLabel">Companies</div></div>
       <div class="sum-cell"><div class="sum-n warn skel" id="thirdPartyCount">&nbsp;</div><div class="sum-l">3rd Party</div></div>
       <div class="sum-cell"><div class="sum-n danger skel" id="trackerCount">&nbsp;</div><div class="sum-l">Trackers</div></div>
     </div>
@@ -280,10 +307,9 @@
     <div id="findingsBanner" style="margin:0;padding:0"></div>
 
     <div class="tabs">
-      <button class="tab active" data-panel="requests">Requests</button>
+      <button class="tab active" data-panel="requests">Overview</button>
+      <button class="tab" data-panel="trackers">Trackers</button>
       <button class="tab" data-panel="cookies">Cookies</button>
-      <button class="tab" data-panel="story" id="tabStory">Story</button>
-      <button class="tab" data-panel="protect" id="tabProtect">Protect</button>
     </div>
 
     <div class="panel active" id="panel-requests">
@@ -292,20 +318,27 @@
       <div id="blockHint" style="display:none;margin:0 12px 8px;padding:7px 10px;border-radius:var(--radius-md);background:rgba(var(--accent-rgb),.08);border:1px solid rgba(var(--accent-rgb),.25);color:var(--accent2);font-size:10px;line-height:1.5"></div>
     </div>
 
+    <div class="panel" id="panel-trackers"><p class="section-title">Known tracking domains</p><ul class="domain-list" id="trackerList"></ul><p class="popup-note">Matched against a known tracker list. Classification alone does not prove harm.</p></div>
+
     <div class="panel" id="panel-cookies">
       <div class="ck-summary" id="cookieStats"></div>
       <p class="section-title">Cookie details</p>
       <div class="cookie-list" id="cookieList"></div>
     </div>
 
-    <div class="panel" id="panel-story">
-      <div id="storyContent" style="padding:10px 14px 12px;font-size:12px;color:rgba(160,180,220,0.82);line-height:1.72;max-height:280px;overflow-y:auto"></div>
+    <button class="more-insights" id="btnMoreInsights" type="button" aria-expanded="false">Story and protection tips <span aria-hidden="true">⌄</span></button>
+    <div id="extraInsights" hidden>
+    <h2 class="section-title">Story</h2>
+    <div class="panel active" id="panel-story">
+      <div id="storyContent" style="padding:10px 14px 12px;font-size:12px;color:var(--text2);line-height:1.72;max-height:280px;overflow-y:auto"></div>
     </div>
 
-    <div class="panel" id="panel-protect">
+    <h2 class="section-title">Protection tips</h2>
+    <div class="panel active" id="panel-protect">
       <div class="protect-list" id="protectList"></div>
     </div>
 
+    </div>
     <p id="error"></p>
 
     <div class="footer">

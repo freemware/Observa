@@ -1,4 +1,4 @@
-// WebLens tracker/cookie list refresh — background/list-refresh.js (v0.11.0)
+// Observa tracker/cookie list refresh — background/list-refresh.js (v0.11.0)
 //
 // Opt-in, off by default. Fetches the same two upstream sources the bundled
 // classify/tracker-list.js and classify/cookie-db.js snapshots were
@@ -9,9 +9,9 @@
 // in each). A failed or disabled refresh always degrades to exactly today's
 // bundled-only behavior — it can only add freshness, never remove data.
 //
-// This is the one place WebLens makes a network request of its own (every
+// This is the one place Observa makes a network request of its own (every
 // other request is triggered by the site the user is visiting, not by
-// WebLens). It fetches only these two fixed, publicly-documented URLs —
+// Observa). It fetches only these two fixed, publicly-documented URLs —
 // never anything derived from browsing activity — and sends nothing.
 //
 // Sources (same as the bundled snapshots' attribution):
@@ -27,8 +27,31 @@ import { loadLiveCookieDbOverlay } from '../classify/cookie-db.js';
 const DISCONNECT_URL = 'https://raw.githubusercontent.com/disconnectme/disconnect-tracking-protection/master/services.json';
 const COOKIE_DB_URL = 'https://raw.githubusercontent.com/jkwakman/Open-Cookie-Database/master/open-cookie-database.csv';
 
-const META_KEY = 'weblens:listsMeta';
-const ALARM_NAME = 'weblens-list-refresh';
+const META_KEY = 'observa:listsMeta';
+const ALARM_NAME = 'observa-list-refresh';
+// A separate one-shot used to catch up after a failure or a long gap. Kept
+// distinct from the periodic alarm so a retry never disturbs the regular
+// schedule.
+const CATCHUP_ALARM = 'observa-list-catchup';
+const CATCHUP_DELAY_MINUTES = 2;        // after startup, once data looks stale
+const RETRY_BASE_MINUTES = 30;          // after a failed refresh
+const RETRY_MAX_MINUTES = 6 * 60;
+
+/**
+ * Exponential backoff for a failed refresh, capped.
+ *
+ * Exported so it can be unit-tested directly: the e2e suite reaches the real
+ * upstream successfully, which means the failure path never runs there. An
+ * untested retry is how a list quietly stops updating on the machines where it
+ * matters most — the ones that are frequently offline.
+ *
+ * @param {number} consecutiveFailures 1 for the first failure
+ * @returns {number} minutes to wait before retrying
+ */
+export function retryDelayMinutes(consecutiveFailures) {
+  const n = Math.max(1, Math.floor(consecutiveFailures || 1));
+  return Math.min(RETRY_BASE_MINUTES * 2 ** (n - 1), RETRY_MAX_MINUTES);
+}
 // Once a day. Both upstream sources are maintained lists, not live feeds —
 // Disconnect's and Open Cookie Database's own commit history runs on the
 // order of days-to-weeks, not hours — so daily already checks noticeably
@@ -40,7 +63,7 @@ const ALARM_NAME = 'weblens-list-refresh';
 // settings.js) moved from opt-in to on.
 const REFRESH_PERIOD_MINUTES = 24 * 60;
 
-// Disconnect's raw category names -> WebLens's 8-category taxonomy. Email/
+// Disconnect's raw category names -> Observa's 8-category taxonomy. Email/
 // EmailAggressive are intentionally excluded — the bundled snapshot never
 // included them either, so this keeps refreshed data consistent with the
 // categories the rest of the UI (badges, findings, etc.) already knows.
@@ -138,10 +161,45 @@ export function parseCookieCsv(text) {
   return { exact, wildcard };
 }
 
-async function fetchText(url) {
-  const res = await fetch(url, { cache: 'no-store' });
+async function fetchText(url, etag) {
+  // A conditional request: if the upstream file has not changed, GitHub
+  // answers 304 with no body. Both lists change on the order of days-to-weeks,
+  // so most daily checks transfer nothing — which keeps a daily cadence honest
+  // against the project's "minimal self-initiated egress" posture.
+  const headers = etag ? { 'If-None-Match': etag } : undefined;
+  const res = await fetch(url, { cache: 'no-store', headers });
+  if (res.status === 304) return { notModified: true, text: null, etag };
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-  return res.text();
+  return { notModified: false, text: await res.text(), etag: res.headers.get('etag') };
+}
+
+/**
+ * Arms the periodic alarm WITHOUT disturbing an existing schedule.
+ *
+ * chrome.alarms.create() is documented as replacing a same-named alarm, which
+ * would restart the 24-hour countdown every time this runs. Since this runs at
+ * every service-worker startup, and an MV3 worker restarts constantly, that
+ * would mean the alarm never fires on an extension as active as this one.
+ *
+ * Measured behaviour in Chromium 141 disagrees with the documentation:
+ * re-creating with identical parameters left `scheduledTime` untouched (12ms
+ * delta, not 24 hours). Rather than depend on either — documented behaviour
+ * would break the refresh, observed behaviour is undocumented and could change
+ * — only create the alarm when it is actually missing or has the wrong period.
+ * That is correct under both.
+ */
+async function ensurePeriodicAlarm() {
+  const existing = await chrome.alarms.get(ALARM_NAME).catch(() => null);
+  if (existing && existing.periodInMinutes === REFRESH_PERIOD_MINUTES) return;
+  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: REFRESH_PERIOD_MINUTES });
+}
+
+/** How stale is the stored data, in minutes? Infinity if never fetched. */
+async function minutesSinceLastSuccess() {
+  const stored = await chrome.storage.local.get(META_KEY);
+  const last = stored[META_KEY]?.lastSuccess;
+  if (typeof last !== 'number') return Infinity;
+  return (Date.now() - last) / 60000;
 }
 
 /**
@@ -152,18 +210,43 @@ async function fetchText(url) {
 export async function refreshLists() {
   const checkedAt = Date.now();
   try {
-    const [disconnectText, cookieCsvText] = await Promise.all([
-      fetchText(DISCONNECT_URL),
-      fetchText(COOKIE_DB_URL),
+    const priorMeta = (await chrome.storage.local.get(META_KEY))[META_KEY] ?? {};
+    const [disconnectRes, cookieRes] = await Promise.all([
+      fetchText(DISCONNECT_URL, priorMeta.trackerEtag),
+      fetchText(COOKIE_DB_URL, priorMeta.cookieEtag),
     ]);
 
-    const trackerMap = parseDisconnectList(JSON.parse(disconnectText));
+    // Nothing changed upstream: the stored lists are already current. Record
+    // the successful check so staleness is measured from now, not from the
+    // last time the bytes happened to differ.
+    if (disconnectRes.notModified && cookieRes.notModified) {
+      const meta = {
+        ...priorMeta, lastSuccess: checkedAt, lastChecked: checkedAt,
+        error: null, notModified: true,
+        consecutiveFailures: 0, nextRetryAt: null,
+      };
+      await chrome.storage.local.set({ [META_KEY]: meta });
+      await chrome.alarms.clear(CATCHUP_ALARM);
+      return { ok: true, notModified: true, checkedAt,
+               trackerCount: priorMeta.trackerCount, cookieExactCount: priorMeta.cookieExactCount,
+               cookieWildcardCount: priorMeta.cookieWildcardCount };
+    }
+
+    const disconnectText = disconnectRes.notModified ? null : disconnectRes.text;
+    const cookieCsvText = cookieRes.notModified ? null : cookieRes.text;
+
+    // One side may be unchanged while the other moved; re-fetch the unchanged
+    // one unconditionally rather than storing a half-updated pair.
+    const disconnectFinal = disconnectText ?? (await fetchText(DISCONNECT_URL)).text;
+    const cookieFinal = cookieCsvText ?? (await fetchText(COOKIE_DB_URL)).text;
+
+    const trackerMap = parseDisconnectList(JSON.parse(disconnectFinal));
     const trackerCount = Object.keys(trackerMap).length;
     if (trackerCount < MIN_TRACKER_DOMAINS) {
       throw new Error(`Parsed tracker list looks too small (${trackerCount} domains) — refusing to overwrite the bundled list.`);
     }
 
-    const cookieDb = parseCookieCsv(cookieCsvText);
+    const cookieDb = parseCookieCsv(cookieFinal);
     const cookieExactCount = Object.keys(cookieDb.exact).length;
     const cookieWildcardCount = cookieDb.wildcard.length;
     if (cookieExactCount < MIN_COOKIE_EXACT || cookieWildcardCount < MIN_COOKIE_WILDCARD) {
@@ -171,21 +254,42 @@ export async function refreshLists() {
     }
 
     await chrome.storage.local.set({
-      'weblens:liveTrackerList': trackerMap,
-      'weblens:liveCookieDb': cookieDb,
+      'observa:liveTrackerList': trackerMap,
+      'observa:liveCookieDb': cookieDb,
     });
     // Reload the in-memory overlays immediately so this refresh takes
     // effect without waiting for the next service-worker restart.
     await Promise.all([loadLiveTrackerOverlay(), loadLiveCookieDbOverlay()]);
 
-    const meta = { lastSuccess: checkedAt, lastChecked: checkedAt, trackerCount, cookieExactCount, cookieWildcardCount, error: null };
+    const meta = {
+      lastSuccess: checkedAt, lastChecked: checkedAt,
+      trackerCount, cookieExactCount, cookieWildcardCount, error: null,
+      trackerEtag: disconnectRes.etag ?? null,
+      cookieEtag: cookieRes.etag ?? null,
+      notModified: false,
+      consecutiveFailures: 0, nextRetryAt: null,
+    };
     await chrome.storage.local.set({ [META_KEY]: meta });
+    // A successful refresh clears any pending retry.
+    await chrome.alarms.clear(CATCHUP_ALARM);
     return { ok: true, trackerCount, cookieExactCount, cookieWildcardCount, checkedAt };
   } catch (err) {
     const prior = await chrome.storage.local.get(META_KEY);
-    const meta = { ...(prior[META_KEY] ?? {}), lastChecked: checkedAt, error: String(err?.message ?? err) };
+    const priorMeta = prior[META_KEY] ?? {};
+    // Back off, but keep trying. Without this a single offline moment meant
+    // waiting a full day for the next scheduled attempt — on a laptop that is
+    // closed and reopened, that is how a list quietly goes weeks out of date.
+    const failures = (priorMeta.consecutiveFailures ?? 0) + 1;
+    const delay = retryDelayMinutes(failures);
+    const meta = {
+      ...priorMeta, lastChecked: checkedAt,
+      error: String(err?.message ?? err),
+      consecutiveFailures: failures,
+      nextRetryAt: checkedAt + delay * 60000,
+    };
     await chrome.storage.local.set({ [META_KEY]: meta });
-    return { ok: false, error: String(err?.message ?? err), checkedAt };
+    await chrome.alarms.create(CATCHUP_ALARM, { delayInMinutes: delay });
+    return { ok: false, error: String(err?.message ?? err), checkedAt, retryInMinutes: delay };
   }
 }
 
@@ -196,7 +300,7 @@ export async function getListsMeta() {
 
 /** Clears the live overlays and metadata, reverting to the bundled snapshots. */
 export async function clearLiveLists() {
-  await chrome.storage.local.remove(['weblens:liveTrackerList', 'weblens:liveCookieDb', META_KEY]);
+  await chrome.storage.local.remove(['observa:liveTrackerList', 'observa:liveCookieDb', META_KEY]);
   await Promise.all([loadLiveTrackerOverlay(), loadLiveCookieDbOverlay()]);
 }
 
@@ -206,24 +310,43 @@ export async function clearLiveLists() {
 export async function initListRefresh() {
   await Promise.all([loadLiveTrackerOverlay(), loadLiveCookieDbOverlay()]);
   const settings = await getSettings();
-  if (settings.listRefreshEnabled) {
-    chrome.alarms.create(ALARM_NAME, { periodInMinutes: REFRESH_PERIOD_MINUTES });
-  } else {
-    chrome.alarms.clear(ALARM_NAME);
+  if (!settings.listRefreshEnabled) {
+    await chrome.alarms.clear(ALARM_NAME);
+    await chrome.alarms.clear(CATCHUP_ALARM);
+    return;
+  }
+
+  await ensurePeriodicAlarm();
+
+  // Catch up on a gap the periodic alarm cannot close by itself.
+  //
+  // A periodic alarm only tells you when the NEXT tick is due; it says nothing
+  // about ticks that never happened. A laptop closed for a fortnight, a machine
+  // that was offline at every scheduled moment, or an alarm lost across an
+  // extension update all leave the data stale with a perfectly healthy-looking
+  // schedule. Measuring the data's own age is the only way to notice.
+  //
+  // Deliberately a short delay rather than an immediate fetch: startup is
+  // already the busiest moment for the worker, and nothing here is urgent.
+  const staleMinutes = await minutesSinceLastSuccess();
+  if (staleMinutes > REFRESH_PERIOD_MINUTES) {
+    const pending = await chrome.alarms.get(CATCHUP_ALARM).catch(() => null);
+    if (!pending) await chrome.alarms.create(CATCHUP_ALARM, { delayInMinutes: CATCHUP_DELAY_MINUTES });
   }
 }
 
 /** Called from settings.js's setSetting flow when listRefreshEnabled changes. */
 export async function onListRefreshSettingChanged(enabled) {
   if (enabled) {
-    chrome.alarms.create(ALARM_NAME, { periodInMinutes: REFRESH_PERIOD_MINUTES });
+    await ensurePeriodicAlarm();
   } else {
-    chrome.alarms.clear(ALARM_NAME);
+    await chrome.alarms.clear(ALARM_NAME);
+    await chrome.alarms.clear(CATCHUP_ALARM);
   }
 }
 
 chrome.alarms?.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== ALARM_NAME) return;
+  if (alarm.name !== ALARM_NAME && alarm.name !== CATCHUP_ALARM) return;
   const settings = await getSettings();
   if (!settings.listRefreshEnabled) return; // setting may have changed since the alarm fired
   await refreshLists();

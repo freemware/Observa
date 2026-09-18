@@ -1,4 +1,4 @@
-// WebLens session history — background/history.js — M5.
+// Observa session history — background/history.js — M5.
 //
 // Durable, opt-in, off-by-default. One summarized record per first-party
 // site per calendar day: counts only (third-party count, cookie count,
@@ -10,8 +10,8 @@
 
 import { getSettings } from './settings.js';
 
-const HISTORY_PREFIX = 'weblens:history:';
-const INDEX_KEY = 'weblens:historyIndex';
+const HISTORY_PREFIX = 'observa:history:';
+const INDEX_KEY = 'observa:historyIndex';
 
 // Caps — bound chrome.storage.local growth. A site keeps at most the last
 // MAX_DAYS_PER_SITE calendar days with activity; the extension as a whole

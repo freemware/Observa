@@ -1,4 +1,4 @@
-// WebLens service worker — M4.
+// Observa service worker — M4.
 
 import { registerCaptureListeners } from './capture.js';
 import { startSession, endSession, getSessionForTab, getAllSessionIds, clearSessionForTab } from './session.js';
@@ -7,6 +7,7 @@ import { getSettings, setSetting } from './settings.js';
 import { getHistoryFor, clearAllHistory } from './history.js';
 import { isBlocked, getBlockedForSite, blockDomainOnSite, unblockDomainOnSite, clearAllBlocks } from './blocking.js';
 import { initListRefresh, refreshLists, getListsMeta, clearLiveLists, onListRefreshSettingChanged } from './list-refresh.js';
+import { analyzePolicyForTab, analyzeManualDocument, getPolicyIntelForTab, clearPolicyIntelForTab } from './policy-intel.js';
 
 // Allow extension pages (dashboard) to read chrome.storage.session directly.
 // Must be called before any storage writes.
@@ -25,28 +26,33 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   if (details.url.startsWith('chrome-extension://')) return;
   if (details.url.startsWith('chrome://')) return;
   await startSession(details.tabId, details.url);
+  // A new top-level navigation means any Policy Intelligence result cached
+  // for this tab belongs to the page that just left — clear it so the
+  // dashboard doesn't show a stale policy analysis for a different site.
+  await clearPolicyIntelForTab(details.tabId).catch(console.error);
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await endSession(tabId);
+  await clearPolicyIntelForTab(tabId).catch(console.error);
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'weblens:getSession') {
+  if (message?.type === 'observa:getSession') {
     getSessionForTab(message.tabId)
       .then(sendResponse)
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:getCookies') {
+  if (message?.type === 'observa:getCookies') {
     getCookiesForUrl(message.url)
       .then(cookies => sendResponse({ cookies, summary: summarizeCookies(cookies) }))
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:clearSession') {
+  if (message?.type === 'observa:clearSession') {
     clearSessionForTab(message.tabId)
       .then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ error: String(err) }));
@@ -54,7 +60,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   // Dashboard uses this — returns the most recent non-extension session
-  if (message?.type === 'weblens:getMostRecentSession') {
+  if (message?.type === 'observa:getMostRecentSession') {
     getAllSessionIds()
       .then(async tabIds => {
         let best = null;
@@ -73,7 +79,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === 'weblens:getSessions') {
+  if (message?.type === 'observa:getSessions') {
     getAllSessionIds()
       .then(sendResponse)
       .catch(err => sendResponse({ error: String(err) }));
@@ -82,14 +88,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   // ── M5: settings, history ──────────────────────────────────────────────────
 
-  if (message?.type === 'weblens:getSettings') {
+  if (message?.type === 'observa:getSettings') {
     getSettings()
       .then(sendResponse)
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:setSetting') {
+  if (message?.type === 'observa:setSetting') {
     setSetting(message.key, message.value)
       .then(async (next) => {
         if (message.key === 'listRefreshEnabled') {
@@ -102,28 +108,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   // ── v0.11.0: tracker/cookie list refresh (opt-in) ────────────────────────
-  if (message?.type === 'weblens:getListsMeta') {
+  if (message?.type === 'observa:getListsMeta') {
     getListsMeta()
       .then(meta => sendResponse({ meta }))
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:refreshListsNow') {
+  if (message?.type === 'observa:refreshListsNow') {
     refreshLists()
       .then(sendResponse)
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:clearLiveLists') {
+  if (message?.type === 'observa:clearLiveLists') {
     clearLiveLists()
       .then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:getHistory') {
+  if (message?.type === 'observa:getHistory') {
     getHistoryFor(message.etld1)
       .then(days => sendResponse({ days }))
       .catch(err => sendResponse({ error: String(err) }));
@@ -131,8 +137,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   // Clears the opt-in history store. Per-tab session data has its own clear
-  // path (weblens:clearSession) and is intentionally untouched here.
-  if (message?.type === 'weblens:clearDurableData') {
+  // path (observa:clearSession) and is intentionally untouched here.
+  if (message?.type === 'observa:clearDurableData') {
     clearAllHistory()
       .then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ error: String(err) }));
@@ -140,41 +146,70 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   // ── M6: Verify & Protect — site-scoped blocking ────────────────────────────
-  // Every call here is a direct response to an explicit user click. WebLens
+  // Every call here is a direct response to an explicit user click. Observa
   // never blocks on its own initiative.
 
-  if (message?.type === 'weblens:isBlocked') {
+  if (message?.type === 'observa:isBlocked') {
     isBlocked(message.siteEtld1, message.domain)
       .then(blocked => sendResponse({ blocked }))
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:getBlockedForSite') {
+  if (message?.type === 'observa:getBlockedForSite') {
     getBlockedForSite(message.siteEtld1)
       .then(domains => sendResponse({ domains }))
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:blockDomain') {
+  if (message?.type === 'observa:blockDomain') {
     blockDomainOnSite(message.siteEtld1, message.domain)
       .then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:unblockDomain') {
+  if (message?.type === 'observa:unblockDomain') {
     unblockDomainOnSite(message.siteEtld1, message.domain)
       .then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ error: String(err) }));
     return true;
   }
 
-  if (message?.type === 'weblens:clearAllBlocks') {
+  if (message?.type === 'observa:clearAllBlocks') {
     clearAllBlocks()
       .then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ error: String(err) }));
+    return true;
+  }
+
+  // ── Policy Intelligence ─────────────────────────────────────────────────
+  // Auto-discovery + analysis runs only when the dashboard explicitly asks
+  // for it (opening the Policy Intelligence view for a session), not
+  // proactively on every page load — see background/policy-intel.js's
+  // header comment for the full reasoning on the network egress involved.
+
+  if (message?.type === 'observa:getPolicyIntel') {
+    getPolicyIntelForTab(message.tabId)
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: String(err) }));
+    return true;
+  }
+
+  if (message?.type === 'observa:analyzePolicy') {
+    analyzePolicyForTab(message.tabId, message.pageUrl, { force: !!message.force })
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: String(err) }));
+    return true;
+  }
+
+  if (message?.type === 'observa:analyzeManualPolicy') {
+    analyzeManualDocument(message.tabId, message.pageUrl, {
+      docType: message.docType, url: message.url, text: message.text,
+    })
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: String(err?.message ?? err) }));
     return true;
   }
 });

@@ -1,4 +1,4 @@
-// WebLens shared theme controller — applies/toggles data-theme on <html>,
+// Observa shared theme controller — applies/toggles data-theme on <html>,
 // persisted via the existing settings store (background/settings.js), so
 // popup and dashboard always agree on which theme is active. 'system'
 // (the default) means "no explicit choice" — theme.css's prefers-color-scheme
@@ -6,7 +6,7 @@
 
 export async function applyStoredTheme() {
   try {
-    const settings = await chrome.runtime.sendMessage({ type: 'weblens:getSettings' });
+    const settings = await chrome.runtime.sendMessage({ type: 'observa:getSettings' });
     setThemeAttr(settings?.theme ?? 'system');
     return settings?.theme ?? 'system';
   } catch {
@@ -22,7 +22,7 @@ export function setThemeAttr(theme) {
 
 export async function setTheme(theme) {
   setThemeAttr(theme);
-  try { await chrome.runtime.sendMessage({ type: 'weblens:setSetting', key: 'theme', value: theme }); }
+  try { await chrome.runtime.sendMessage({ type: 'observa:setSetting', key: 'theme', value: theme }); }
   catch { /* best effort — UI already reflects the change */ }
 }
 

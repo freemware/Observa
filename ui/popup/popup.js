@@ -1,9 +1,11 @@
-// WebLens popup — M3 refinement.
+// Observa popup — M3 refinement.
 import { lookupCookie } from '../../classify/cookie-db.js';
 import { getEtld1 } from '../../classify/classify.js';
 import { isBlockedError } from '../../shared/schema.js';
 import { icon } from '../icons.js';
 import { applyStoredTheme, cycleTheme } from '../theme.js';
+import { computeVerdict, TRACKING_CATEGORIES } from '../../shared/verdict.js';
+import { summarizeSessionSignals } from '../../shared/session-signals.js';
 
 // Tabs, clear button, improved cookie layout, capture timing notice.
 
@@ -25,15 +27,15 @@ document.getElementById('btnTheme')?.addEventListener('click', async () => {
   updateThemeButtonIcon();
 });
 document.getElementById('btnDashboard').innerHTML = `Full dashboard ${icon('chevron-right',{size:12})}`;
-document.getElementById('tabStory').innerHTML = `${icon('book-open',{size:12})} Story`;
-document.getElementById('tabProtect').innerHTML = `${icon('shield',{size:12})} Protect`;
+document.getElementById('btnMoreInsights').addEventListener('click', e => { const panel = document.getElementById('extraInsights'); panel.hidden = !panel.hidden; e.currentTarget.setAttribute('aria-expanded', String(!panel.hidden)); });
+document.getElementById('btnTopAction').addEventListener('click', () => document.getElementById('btnDashboard').click());
 
 // ---------------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------------
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab, .panel').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tabs .tab, #panel-requests, #panel-trackers, #panel-cookies').forEach(el => el.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById(`panel-${btn.dataset.panel}`).classList.add('active');
     // Clear button only meaningful on requests tab
@@ -86,7 +88,7 @@ function buildDomainSummary(requests) {
     const d = map.get(key);
     d.count++;
     // Distinguishes "attempted but cancelled by an extension's block rule"
-    // from a completed request — WebLens's own onBeforeRequest observer
+    // from a completed request — Observa's own onBeforeRequest observer
     // still logs an attempt even when M6 (or another blocker) cancels it,
     // so the raw count alone can't answer "did the block actually work?".
     if (isBlockedError(req)) d.blockedCount++;
@@ -98,22 +100,69 @@ function buildDomainSummary(requests) {
   });
 }
 
+
+// ── The one-line answer ───────────────────────────────────────────────────────
+// Same engine as the Overview, fed from the same shared summariser, so the
+// popup and the dashboard cannot disagree about the same page. An e2e check
+// asserts the two labels match; if they ever drift, that test fails.
+let _lastSignals = null;
+
+function renderPopupVerdict(session, cookies) {
+  const el = document.getElementById('popupVerdict');
+  if (!el || !session) return;
+  const s = summarizeSessionSignals({ requests: session.requests ?? [], cookies: cookies ?? [] });
+  _lastSignals = s;
+  // The stat strip must come from the SAME summary as the verdict above it.
+  // It used to count raw domains while the verdict counted companies, so the
+  // popup contradicted itself as well as the dashboard.
+  setStats(['totalDomains'], s.companyCount);
+  setStats(['thirdPartyCount'], s.thirdPartyCount);
+  setStats(['trackerCount'], s.trackingDomainCount);
+  const dl = document.getElementById('domainsLabel');
+  if (dl) dl.textContent = s.companyCount === 1 ? 'Company' : 'Companies';
+  const v = computeVerdict({
+    thirdPartyCount: s.thirdPartyCount,
+    byCategory: s.byCategory,
+    personalDataTypes: s.personalDataTypes,
+    trackingIdCount: s.trackingIdCount,
+    requestCount: s.requestCount,
+  });
+  el.classList.remove('caution', 'concern');
+  if (v.band !== 'reasonable') el.classList.add(v.band);
+  document.getElementById('pvLabel').textContent = v.label;
+  document.getElementById('pvHead').textContent = v.headline;
+  // One supporting line only — the full list lives in the dashboard.
+  document.getElementById('pvWhy').textContent = v.reasons.length
+    ? v.reasons[0].text
+    : 'Nothing here matched a known tracker or a personal-data pattern.';
+  el.hidden = false;
+}
+
 function renderRequests(session) {
   document.getElementById('pageUrl').textContent = session.pageUrl ?? '—';
   setStats(['totalRequests'], session.requests.length);
 
+  // Counts are set by renderPopupVerdict from the shared summariser, so the
+  // strip and the verdict cannot disagree. buildDomainSummary still drives the
+  // per-domain LIST below, which is deliberately per-domain: it is where a
+  // reader goes to see the actual hostnames and block them individually.
   const domains = buildDomainSummary(session.requests);
-  setStats(['totalDomains'], domains.length);
-  setStats(['thirdPartyCount'], domains.filter(d => d.party === 'third-party').length);
-  setStats(['trackerCount'], domains.filter(d => d.category).length);
+
+  // Render the verdict and strip immediately from the session alone. Cookie
+  // exposures are first-party by definition and never escalate, so the counts
+  // do not depend on them; the cookie path re-renders with them once loaded.
+  // Without this the whole strip stayed blank whenever the cookie query failed.
+  renderPopupVerdict(session, []);
 
   const list = document.getElementById('domainList');
+  const trackerList = document.getElementById('trackerList');
   if (!domains.length) {
-    list.innerHTML = '<li style="opacity:.4;grid-column:1/-1;display:block;padding:6px 0">No requests captured. Reload the page with WebLens active.</li>';
+    list.innerHTML = '<li style="opacity:.4;grid-column:1/-1;display:block;padding:6px 0">No requests captured. Reload the page with Observa active.</li>';
+    trackerList.innerHTML = '<li>No trackers matched yet.</li>';
     return;
   }
 
-  list.innerHTML = domains.map(d => {
+  const renderDomains = entries => entries.map(d => {
     const partyKey = d.party === 'first-party' ? 'first' : d.party === 'third-party' ? 'third' : 'unknown';
     const badge = d.category
       ? `<span class="badge badge-${esc(d.category)}">${esc(d.category)}</span>`
@@ -156,6 +205,9 @@ function renderRequests(session) {
       ${blockRow}
     </li>`;
   }).join('');
+  list.innerHTML = renderDomains(domains);
+  const tracking = domains.filter(d => TRACKING_CATEGORIES.has(d.category));
+  trackerList.innerHTML = tracking.length ? renderDomains(tracking) : '<li style="display:block;padding:10px 4px;color:var(--muted2)">No known tracking domains matched on this page.</li>';
 }
 
 // ---------------------------------------------------------------------------
@@ -170,14 +222,13 @@ function showBlockHint(action) {
     : `${icon('refresh-cw',{size:11})} Reload this page for the unblock to take effect.`);
 }
 
-async function handleBlockClick(domain, action) {
+async function handleBlockClick(domain, action, btn) {
   if (!popupSiteEtld1 || !domain) return;
-  const btn = document.querySelector(`.pop-block-btn[data-domain="${CSS.escape(domain)}"]`);
   const prevLabel = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = action === 'block' ? 'Blocking…' : 'Unblocking…'; }
 
   try {
-    const type = action === 'block' ? 'weblens:blockDomain' : 'weblens:unblockDomain';
+    const type = action === 'block' ? 'observa:blockDomain' : 'observa:unblockDomain';
     const result = await chrome.runtime.sendMessage({ type, siteEtld1: popupSiteEtld1, domain });
     if (result?.error) throw new Error(result.error);
 
@@ -187,16 +238,16 @@ async function handleBlockClick(domain, action) {
     if (currentSession) renderRequests(currentSession);
     showBlockHint(action);
   } catch (err) {
-    console.error('[WebLens] block/unblock failed:', err);
+    console.error('[Observa] block/unblock failed:', err);
     if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
   }
 }
 
-document.getElementById('domainList')?.addEventListener('click', e => {
+document.querySelectorAll('#domainList, #trackerList').forEach(list => list.addEventListener('click', e => {
   const btn = e.target.closest('.pop-block-btn');
   if (!btn) return;
-  handleBlockClick(btn.dataset.domain, btn.dataset.action);
-});
+  handleBlockClick(btn.dataset.domain, btn.dataset.action, btn);
+}));
 
 // ---------------------------------------------------------------------------
 // Cookies tab
@@ -284,7 +335,7 @@ function renderCookies({ cookies, summary }) {
     // Language is calibrated: SameSite=None means cross-site eligible, not "sent everywhere"
     const attrFlags = [];
     if (c.longLived && c.sameSite === 'no_restriction')
-      attrFlags.push('Persistent and cross-site eligible — can accompany requests to this domain from other sites, and will persist for ' + (c.daysUntilExpiry != null ? c.daysUntilExpiry + ' more days' : 'an extended period') + '. This increases tracking potential but WebLens has not directly observed it being used across multiple websites.');
+      attrFlags.push('Persistent and cross-site eligible — can accompany requests to this domain from other sites, and will persist for ' + (c.daysUntilExpiry != null ? c.daysUntilExpiry + ' more days' : 'an extended period') + '. This increases tracking potential but Observa has not directly observed it being used across multiple websites.');
     else if (c.longLived)
       attrFlags.push('Persists for ' + (c.daysUntilExpiry != null ? c.daysUntilExpiry + ' days' : 'an extended period') + ' — allows the site to recognise you across many visits.');
     if (c.sameSite === 'no_restriction' && !c.longLived)
@@ -353,7 +404,7 @@ function renderCookies({ cookies, summary }) {
     const purposeProvenance = dbEntry ? 'Classified' : 'Unknown';
     const purposeSource     = dbEntry ? `Open Cookie Database · ${dbEntry.dc||''}` : 'Not found in database';
     const crossSiteNote     = c.sameSite === 'no_restriction'
-      ? 'Inferred from SameSite=None — WebLens has not observed this cookie used across multiple websites.'
+      ? 'Inferred from SameSite=None — Observa has not observed this cookie used across multiple websites.'
       : 'N/A — SameSite policy restricts cross-site use.';
 
     const evidenceHtml = `
@@ -407,7 +458,6 @@ function renderCookies({ cookies, summary }) {
       </div>
     </div>`;
   }).join('');
-
   // Event delegation — fixes type="module" inline onclick limitation
   list.addEventListener('click', e => {
     const row = e.target.closest('.cookie-row');
@@ -426,7 +476,7 @@ const CAT_LABELS_POPUP = {
 
 function buildPopupStory(session, cookies) {
   const reqs = session.requests ?? [];
-  if (!reqs.length) return '<p>No requests captured yet. Reload the page with WebLens active.</p>';
+  if (!reqs.length) return '<p>No requests captured yet. Reload the page with Observa active.</p>';
 
   const pageHost = (() => { try { return new URL(session.pageUrl).hostname; } catch { return session.pageUrl; } })();
   const totalMs = reqs.length > 1
@@ -495,15 +545,16 @@ function renderStoryTab(session, cookies) {
 // Clear button
 // ---------------------------------------------------------------------------
 async function clearAndReload(tabId, tabUrl) {
-  await chrome.runtime.sendMessage({ type: 'weblens:clearSession', tabId });
+  await chrome.runtime.sendMessage({ type: 'observa:clearSession', tabId });
   const [session, cookieResult] = await Promise.all([
-    chrome.runtime.sendMessage({ type: 'weblens:getSession', tabId }),
-    chrome.runtime.sendMessage({ type: 'weblens:getCookies', url: tabUrl }),
+    chrome.runtime.sendMessage({ type: 'observa:getSession', tabId }),
+    chrome.runtime.sendMessage({ type: 'observa:getCookies', url: tabUrl }),
   ]);
   if (session && !session.error) { currentSession = session; renderRequests(session); }
   if (cookieResult && !cookieResult.error) {
     renderCookies(cookieResult);
     // Also refresh findings banner and story tab after clear
+    renderPopupVerdict(session, cookieResult.cookies ?? []);
     renderFindingsBanner(session, cookieResult.cookies ?? []);
     renderStoryTab(session, cookieResult.cookies ?? []);
   }
@@ -545,24 +596,9 @@ function renderProtectTab(session, cookieResult) {
 function renderFindingsBanner(session, cookies) {
   const el = document.getElementById('findingsBanner');
   if (!el) return;
-  const requests = session?.requests ?? [];
-  const hasFP = requests.some(r => r.category === 'Fingerprinting');
-  const hasCM = requests.some(r => r.category === 'Cryptomining');
-  const hasLongCross = cookies.filter(c => c.longLived && c.sameSite === 'no_restriction').length;
-
-  // Only show banner for high-severity classified categories.
-  // Cross-site eligible cookies are explained in each cookie card — no banner needed.
-  if (hasFP || hasCM) {
-    const what = hasCM
-      ? `${icon('zap',{size:12})} Cryptominer classified`
-      : `${icon('search',{size:12})} Fingerprinter classified`;
-    el.innerHTML = `<div class="findings-banner sev-red">
-      <div class="findings-banner-title">${what}</div>
-      <div class="findings-banner-sub">Open the full dashboard for details and context.</div>
-    </div>`;
-  } else {
-    el.innerHTML = ''; // No banner for normal sessions — don't alarm users unnecessarily
-  }
+  // The verdict already carries the highest-priority reason. Keep one clear
+  // headline instead of repeating it in a second warning banner.
+  el.replaceChildren();
 }
 
 // ---------------------------------------------------------------------------
@@ -581,7 +617,22 @@ renderSkeleton();
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+// Normally the popup reports on whatever tab it was opened over. An explicit
+// ?tabId= override exists so this page can be opened as an ordinary tab and
+// inspected — as an action popup it would otherwise query *itself* as the
+// active tab. The e2e suite uses it to assert the popup's verdict matches the
+// dashboard's for the same page; without it that coherence check can't run at
+// all, and an unverifiable guarantee is not one. Read-only: it only chooses
+// which already-captured session to display.
+const overrideTabId = Number(new URLSearchParams(location.search).get('tabId'));
+let tab = null;
+if (Number.isInteger(overrideTabId) && overrideTabId > 0) {
+  tab = await chrome.tabs.get(overrideTabId).catch(() => null);
+}
+if (!tab) {
+  const active = await chrome.tabs.query({ active: true, currentWindow: true });
+  tab = active[0] ?? null;
+}
 const tabId  = tab?.id  ?? null;
 const tabUrl = tab?.url ?? null;
 
@@ -593,17 +644,17 @@ if (!tabId) {
   try { if (tabUrl) popupSiteEtld1 = getEtld1(new URL(tabUrl).hostname); } catch { /* no page URL yet */ }
 
   const [session, cookieResult, blockedResult] = await Promise.all([
-    chrome.runtime.sendMessage({ type: 'weblens:getSession', tabId }),
-    chrome.runtime.sendMessage({ type: 'weblens:getCookies', url: tabUrl }),
+    chrome.runtime.sendMessage({ type: 'observa:getSession', tabId }),
+    chrome.runtime.sendMessage({ type: 'observa:getCookies', url: tabUrl }),
     popupSiteEtld1
-      ? chrome.runtime.sendMessage({ type: 'weblens:getBlockedForSite', siteEtld1: popupSiteEtld1 })
+      ? chrome.runtime.sendMessage({ type: 'observa:getBlockedForSite', siteEtld1: popupSiteEtld1 })
       : Promise.resolve(null),
   ]);
   popupBlockedSet = new Set(blockedResult?.domains ?? []);
 
   if (!session) {
     document.getElementById('pageUrl').textContent = tabUrl ?? '—';
-    document.getElementById('error').textContent = 'No session yet — reload the page with WebLens active.';
+    document.getElementById('error').textContent = 'No session yet — reload the page with Observa active.';
   } else if (session.error) {
     document.getElementById('error').textContent = session.error;
   } else {
@@ -613,6 +664,7 @@ if (!tabId) {
 
   if (cookieResult && !cookieResult.error) {
     renderCookies(cookieResult);
+    renderPopupVerdict(session, cookieResult.cookies ?? []);
     renderFindingsBanner(session, cookieResult.cookies ?? []);
     renderProtectTab(session, cookieResult);
     renderStoryTab(session, cookieResult.cookies ?? []);
